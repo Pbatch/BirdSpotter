@@ -8,8 +8,8 @@ from pathlib import Path
 from birdspotter.models import (
     default_weights_dir,
     prepare_models,
+    prepare_sam21_checkpoint,
     sam21_openvino_dir,
-    sam21_path,
 )
 from birdspotter.sam21_export import export_sam21_openvino
 
@@ -34,7 +34,7 @@ def main() -> None:
     weights_dir = args.weights_dir.resolve()
     prepare_models(weights_dir, calibration_data=args.calibration_data.resolve())
     encoder_path, mask_predictor_path = export_sam21_openvino(
-        sam21_path(weights_dir), sam21_openvino_dir(weights_dir)
+        prepare_sam21_checkpoint(weights_dir), sam21_openvino_dir(weights_dir)
     )
     print(f"Saved SAM 2.1 OpenVINO image encoder: {encoder_path}")
     print(f"Saved SAM 2.1 OpenVINO mask predictor: {mask_predictor_path}")

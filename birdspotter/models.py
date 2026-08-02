@@ -21,6 +21,8 @@ COCO_BIRD_CLASS_ID = 14
 DETECTOR_BIRD_CLASS_ID = 0
 DETECTOR_BIRD_CLASS_NAME = "bird"
 SAM21_FILENAME = "sam2.1_l.pt"
+SAM21_SOURCE_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+SAM21_SOURCE_SHA256 = "ab7e1ac9cb9f6eb3bcf197ece044f06a707ec49129361a2b47e93e1db6989efd"
 SAM21_OPENVINO_DIRNAME = "openvino-512"
 
 
@@ -168,6 +170,14 @@ def download(url: str, destination: Path, expected_sha256: str) -> None:
     except Exception:
         partial.unlink(missing_ok=True)
         raise
+
+
+def prepare_sam21_checkpoint(weights_dir: Path) -> Path:
+    """Download the official SAM 2.1 Large checkpoint when it is absent."""
+
+    checkpoint = sam21_path(weights_dir)
+    download(SAM21_SOURCE_URL, checkpoint, SAM21_SOURCE_SHA256)
+    return checkpoint
 
 
 def export_detector(

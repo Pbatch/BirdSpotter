@@ -3,7 +3,7 @@ name = "BirdSpotter"
 version = "0.1.0"
 description = "Select and segment the highest-confidence bird from a webcam stream."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = "==3.12.13"
 dependencies = [
     "numpy==2.4.2",
     "opencv-python-headless==4.14.0.94",

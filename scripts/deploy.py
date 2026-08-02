@@ -62,16 +62,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=896)
     parser.add_argument("--camera-fps", type=int, default=5)
     parser.add_argument("--output-dir", type=Path, default=Path("segmented"))
-    parser.add_argument(
-        "--duration-minutes",
-        type=float,
-        default=None,
-        help="Stop after this duration (default: run continuously)",
-    )
-    args = parser.parse_args()
-    if args.duration_minutes is not None and args.duration_minutes <= 0:
-        raise ValueError("--duration-minutes must be positive")
-    return args
+    return parser.parse_args()
 
 
 def update_window_winner(
@@ -125,7 +116,6 @@ def run_detection_loop(
     detector: BirdDetector,
     segmenter: Sam21OpenVinoSegmenter,
     output_dir: Path,
-    duration_minutes: float | None,
 ) -> BirdCandidate | None:
     """Run detector windows and return any unsaved partial-window winner."""
 
@@ -134,7 +124,7 @@ def run_detection_loop(
     next_detection = started
     sequence = 0
     best: BirdCandidate | None = None
-    while duration_minutes is None or time.monotonic() - started < duration_minutes * 60:
+    while True:
         now = time.monotonic()
         if now < next_detection:
             time.sleep(min(0.02, next_detection - now))
@@ -143,7 +133,10 @@ def run_detection_loop(
         frame = camera.newest(after_sequence=sequence)
         sequence = frame.sequence
         best = update_window_winner(detector, frame, best)
-        next_detection = time.monotonic() + 1 / DETECTOR_FPS
+        # Advance from the prior target time rather than from inference completion.
+        # This preserves the requested cadence when inference is fast and naturally
+        # skips the wait when an inference call overruns its one-second budget.
+        next_detection += 1 / DETECTOR_FPS
         if time.monotonic() - window_started >= WINDOW_MINUTES * 60:
             save_best_candidate(best, segmenter, output_dir)
             best = None
@@ -153,7 +146,7 @@ def run_detection_loop(
 
 
 def main() -> None:
-    """Run the deployment loop until interrupted or an optional duration elapses."""
+    """Run the deployment loop until interrupted."""
 
     args = parse_arguments()
     weights_dir = default_weights_dir()
@@ -169,7 +162,7 @@ def main() -> None:
         fps=args.camera_fps,
     ) as camera:
         print(f"Camera settings: {camera.actual_settings()}")
-        best = run_detection_loop(camera, detector, segmenter, output_dir, args.duration_minutes)
+        best = run_detection_loop(camera, detector, segmenter, output_dir)
     save_best_candidate(best, segmenter, output_dir, partial_window=True)
 
 
