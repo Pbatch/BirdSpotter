@@ -1,0 +1,26 @@
+minimum_pre_commit_version: "4.3.0"
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format check
+        entry: uv run --frozen ruff format --check
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ty-check
+        name: ty check
+        entry: uv run --frozen ty check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
