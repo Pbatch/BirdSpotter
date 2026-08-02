@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from birdspotter.detector_export import export_detector
 from birdspotter.models import (
     default_weights_dir,
-    prepare_models,
+    detector_path,
     prepare_sam21_checkpoint,
     sam21_openvino_dir,
 )
@@ -32,7 +33,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     weights_dir = args.weights_dir.resolve()
-    prepare_models(weights_dir, calibration_data=args.calibration_data.resolve())
+    export_detector(detector_path(weights_dir), calibration_data=args.calibration_data.resolve())
     encoder_path, mask_predictor_path = export_sam21_openvino(
         prepare_sam21_checkpoint(weights_dir), sam21_openvino_dir(weights_dir)
     )

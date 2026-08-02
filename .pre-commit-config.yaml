@@ -19,7 +19,7 @@ repos:
 
       - id: ty-check
         name: ty check
-        entry: uv run --frozen ty check
+        entry: env UV_PROJECT_ENVIRONMENT=.venv-export uv run --frozen --group export ty check
         language: system
         types_or: [python, pyi]
         pass_filenames: false

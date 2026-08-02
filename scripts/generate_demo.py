@@ -37,14 +37,27 @@ def main() -> None:
         detection = detections[0]
         x1, y1, x2, y2 = (round(value) for value in detection.box)
         annotation = image.copy()
-        cv2.rectangle(annotation, (x1, y1), (x2, y2), (40, 220, 40), 2)
+        cv2.rectangle(annotation, (x1, y1), (x2, y2), (0, 0, 0), 5)
+        cv2.rectangle(annotation, (x1, y1), (x2, y2), (255, 255, 255), 2)
+        label = f"bird {detection.confidence:.2f}"
+        label_origin = (x1, max(18, y1 - 8))
         cv2.putText(
             annotation,
-            f"bird {detection.confidence:.2f}",
-            (x1, max(16, y1 - 6)),
+            label,
+            label_origin,
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
-            (40, 220, 40),
+            (0, 0, 0),
+            3,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            annotation,
+            label,
+            label_origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
             1,
             cv2.LINE_AA,
         )
