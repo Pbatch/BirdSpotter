@@ -6,6 +6,6 @@ __pycache__/
 .cache/
 *.pyc
 *.cache
+weights_dev/
 weights/
-demo/
 *.part

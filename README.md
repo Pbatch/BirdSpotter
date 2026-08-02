@@ -2,13 +2,13 @@
 
 This pipeline watches a V4L2 webcam, detects only COCO class `bird`, and keeps
 the single detection with the highest object-detector confidence in each fixed
-selection window. EdgeSAM or SAM 2.1 receives that detection as a box prompt. The primary
+selection window. SAM 2.1 OpenVINO receives that detection as a box prompt. The primary
 output is one tightly cropped PNG containing the original bird pixels and a
 transparent background.
 
 The initial target is a Beelink Mini S12 with an Intel N100 and a Logitech C920.
-The C920 delivers 1920×1080 MJPEG at 30 fps; the pipeline centre-crops each frame to
-1080×1080 before detection and segmentation. YOLO26s runs at 1280×1280 and samples the
+The C920 captures 1600×896 MJPEG at 5 fps. YOLO26s uses a static 1088×1920 detector
+input with slight vertical letterbox padding and samples the
 newest frame at no more than 1 fps by default. The capture thread continually discards stale frames, so a
 slow inference call does not build an increasingly delayed video queue.
 
@@ -16,13 +16,23 @@ slow inference call does not build an increasingly delayed video queue.
 
 For each accepted selection window, `segmented/` receives:
 
-- `bird_*.png`: the required tightly cropped BGRA/RGBA bird image
+- `bird_conf_XX_ts_YYYY-MM-DD_HH-MM.png`: the required tightly cropped BGRA/RGBA bird image
 
 Exactly one bird is segmented. Multiple birds are not merged. Blur, pose, and
 exposure scoring are deliberately absent for now; detector confidence is the
 only quality proxy. If the winning detector box itself encloses overlapping
 birds, SAM can include that overlap; the pipeline does not replace the winning
 detection with a lower-confidence box to avoid it.
+
+## Demo assets
+
+`demo/images/` contains five source images. `demo/annotations/` shows the active
+detector's selected bird box, and `demo/segmentations/` contains the corresponding
+final transparent PNG outputs. Regenerate both with:
+
+```bash
+uv run python scripts/generate_demo.py
+```
 
 ## Environment and model preparation
 
@@ -34,7 +44,7 @@ Prepare the model artifacts on the development machine:
 
 ```bash
 uv sync --group model-export
-uv run birdspotter models --calibration-data path/to/dataset.yaml
+uv run --group model-export python scripts/export_models.py
 uv sync
 uv sync --reinstall-package opencv-python-headless
 ```
@@ -43,64 +53,33 @@ The second `uv sync` removes export-only quantization packages and leaves the ru
 environment at the locked dependency set. OpenCV is explicitly reinstalled because
 its GUI and headless wheels share `cv2` files.
 
-## Run on an image
+The export script creates the bird-only detector from `weights_dev/detector/yolo26s.pt`
+using `demo/calibration.yaml` by default, and converts the SAM checkpoint at
+`weights_dev/sam2.1/sam2.1_l.pt`. It writes only the runtime OpenVINO artifacts under
+`weights/`. Pass `--calibration-data path/to/dataset.yaml` to use a representative
+detector calibration dataset.
 
-```bash
-uv run birdspotter image images/feeder.png --confidence 0.10
-```
-
-To use SAM 2.1 instead of the default EdgeSAM, place Ultralytics'
-`sam2.1_l.pt` checkpoint at `weights/sam2.1/sam2.1_l.pt` and pass
-`--segmenter sam2.1`:
-
-```bash
-uv run birdspotter image images/feeder.png --segmenter sam2.1
-```
-
-For the OpenVINO-optimized SAM 2.1 image path, first convert the same checkpoint:
-
-```bash
-uv run birdspotter models --calibration-data path/to/dataset.yaml --export-sam21-openvino
-uv run birdspotter image images/feeder.png --segmenter sam2.1-openvino
-```
-
-The conversion creates an OpenVINO image encoder and box-prompt mask predictor under
-`weights/sam2.1/openvino-256/`, with a fixed 256×256 image input. This path supports
-still-image segmentation; SAM 2.1 video tracking needs additional memory-model
-conversions.
+BirdSpotter always uses the fixed 512×512 SAM 2.1 OpenVINO segmenter. Its conversion
+creates an image encoder and box-prompt mask predictor under
+`weights/sam2.1/openvino-512/`. SAM 2.1 video tracking needs additional memory-model
+conversions and is outside this pipeline.
 
 Detector inference always uses a static batch-one INT8 OpenVINO model whose classification
 heads have been reduced from 80 COCO classes to the pretrained `bird` channel (COCO class 14).
 The exported graph therefore emits bird detections as class 0; the application maps that back
-to COCO class 14 in its metadata. There are no runtime backend or precision switches. Run an
-image with:
+to COCO class 14 in its metadata. There are no runtime backend or precision switches.
+
+## Deployment loop
+
+Run the five-minute selection loop with:
 
 ```bash
-uv run birdspotter image images/feeder.png
+uv run python scripts/deploy.py
 ```
 
-Create the INT8 detector with a representative calibration dataset:
-
-```bash
-uv run --group model-export birdspotter models --calibration-data path/to/dataset.yaml
-```
-
-Exit status `2` means no bird passed the detector threshold.
-
-## Run on the C920
-
-Stop after producing one segmented bird:
-
-```bash
-uv run birdspotter webcam \
-  --device 0 \
-  --window-seconds 4 \
-  --sample-fps 1 \
-  --max-outputs 1
-```
-
-Run continuously with `--max-outputs 0`. Use `--duration 30` for a bounded
-smoke test. The `pbatch` account must belong to the `video` group.
+It evaluates the newest camera frame at 1 FPS, retains the strict
+highest-confidence bird per five-minute window, then writes one final transparent PNG named
+`bird_conf_XX_ts_YYYY-MM-DD_HH-MM.png`. Use `--duration-minutes` for a bounded run.
 
 ## Current Beelink deployment
 
@@ -111,16 +90,16 @@ The BirdSpotter working copy is installed at `/home/pbatch/sprite-pipeline`. The
 cd /home/pbatch/sprite-pipeline
 ~/.local/bin/uv sync
 ~/.local/bin/uv run pytest
-~/.local/bin/uv run birdspotter webcam --max-outputs 1
+~/.local/bin/uv run python scripts/deploy.py
 ```
 
-The C920 has been verified at 1920×1080, 30 fps, MJPEG; BirdSpotter uses its central
-1080×1080 square. Measured on the Intel
-N100 with YOLO26s/1280:
+The C920 is configured for 1600×896, 5 fps, MJPEG; BirdSpotter retains the full frame
+and letterboxes it to 1088×1920. Earlier measurements on the Intel
+N100 used the retired YOLO26s/1280 export:
 
 - repeated image inference: 0.76–0.80 seconds per detector call
 - live 1080p capture: 1.414 seconds average detector time and 0.398 effective FPS
-- EdgeSAM: 1.72–1.78 seconds for the selected bird
+- SAM 2.1 OpenVINO timing should be remeasured for the active detector/camera configuration
 - cold detector-plus-segmenter command: 4.75–4.89 seconds
 - peak resident memory: about 703 MB for image commands and 973 MB while capturing
 - package temperature after the short live benchmark: 63°C
@@ -152,7 +131,5 @@ uv run pre-commit install
 
 ## Model licensing
 
-YOLO26 is provided through Ultralytics and is subject to Ultralytics' licensing
-terms. EdgeSAM's official models and source use the S-Lab License 1.0, which
-permits non-commercial use and requires separate permission for commercial use.
-The pipeline code in this repository does not alter those model licenses.
+YOLO26 and SAM 2.1 are provided through Ultralytics and are subject to Ultralytics'
+licensing terms. The pipeline code in this repository does not alter those model licenses.

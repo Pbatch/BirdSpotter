@@ -28,14 +28,3 @@ class BirdCandidate:
     frame_sequence: int
     captured_at: datetime
     detector_seconds: float = 0.0
-
-
-def better_candidate(
-    current: BirdCandidate | None,
-    candidate: BirdCandidate,
-) -> BirdCandidate:
-    """Return the candidate with the higher detector confidence."""
-
-    if current is None or candidate.detection.confidence > current.detection.confidence:
-        return candidate
-    return current

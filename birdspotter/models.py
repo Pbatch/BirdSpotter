@@ -7,31 +7,21 @@ import shutil
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
-import torch
-from ultralytics import YOLO
+if TYPE_CHECKING:
+    import torch
 
 DETECTOR_SOURCE = "yolo26s.pt"
 DETECTOR_SOURCE_URL = "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26s.pt"
 DETECTOR_SOURCE_SHA256 = "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b"
-DETECTOR_INPUT_SIZE = 1280
-DETECTOR_DIRNAME = "yolo26s-bird-1280-openvino-int8"
+DETECTOR_INPUT_SHAPE = (1088, 1920)
+DETECTOR_DIRNAME = "yolo26s-bird-1088x1920-openvino-int8"
 COCO_BIRD_CLASS_ID = 14
 DETECTOR_BIRD_CLASS_ID = 0
 DETECTOR_BIRD_CLASS_NAME = "bird"
-EDGE_ENCODER_FILENAME = "edge_sam_3x_encoder.onnx"
-EDGE_DECODER_FILENAME = "edge_sam_3x_decoder.onnx"
 SAM21_FILENAME = "sam2.1_l.pt"
-SAM21_OPENVINO_DIRNAME = "openvino-256"
-EDGE_ENCODER_URL = (
-    "https://huggingface.co/spaces/chongzhou/EdgeSAM/resolve/main/weights/" + EDGE_ENCODER_FILENAME
-)
-EDGE_DECODER_URL = (
-    "https://huggingface.co/spaces/chongzhou/EdgeSAM/resolve/main/weights/" + EDGE_DECODER_FILENAME
-)
-EDGE_ENCODER_SHA256 = "719a498cf5b3fe9be9f01ee513e13d3915f9028aa4f23dfd30eaaa0a17143159"
-EDGE_DECODER_SHA256 = "83a2174d54571596913dcb7455d021e713623c3dca30a31c8c41ab98c9fb0863"
+SAM21_OPENVINO_DIRNAME = "openvino-512"
 
 
 def project_root() -> Path:
@@ -42,20 +32,18 @@ def default_weights_dir() -> Path:
     return project_root() / "weights"
 
 
+def development_weights_dir(weights_dir: Path) -> Path:
+    """Return the sibling directory used for source checkpoints and export inputs."""
+
+    return weights_dir.with_name("weights_dev")
+
+
 def detector_path(weights_dir: Path) -> Path:
     return weights_dir / "detector" / DETECTOR_DIRNAME
 
 
-def edge_encoder_path(weights_dir: Path) -> Path:
-    return weights_dir / "edgesam" / EDGE_ENCODER_FILENAME
-
-
-def edge_decoder_path(weights_dir: Path) -> Path:
-    return weights_dir / "edgesam" / EDGE_DECODER_FILENAME
-
-
 def sam21_path(weights_dir: Path) -> Path:
-    return weights_dir / "sam2.1" / SAM21_FILENAME
+    return development_weights_dir(weights_dir) / "sam2.1" / SAM21_FILENAME
 
 
 def sam21_openvino_dir(weights_dir: Path) -> Path:
@@ -76,6 +64,10 @@ class BirdOnlyDetectionModel(Protocol):
     names: dict[int, str]
 
 
+class BirdOnlyYoloModel(Protocol):
+    model: BirdOnlyDetectionModel
+
+
 def convolution_pair(value: tuple[int, ...], *, name: str) -> tuple[int, int]:
     """Return a validated two-dimensional Conv2d parameter."""
 
@@ -84,10 +76,12 @@ def convolution_pair(value: tuple[int, ...], *, name: str) -> tuple[int, int]:
     return value[0], value[1]
 
 
-def bird_only_detector(model: YOLO) -> None:
+def bird_only_detector(model: BirdOnlyYoloModel) -> None:
     """Retain only COCO's pretrained bird classifier in a YOLO detection model."""
 
-    detector_model = cast(BirdOnlyDetectionModel, model.model)
+    import torch  # noqa: PLC0415 -- model-export dependency only
+
+    detector_model = model.model
     detector = detector_model.model[-1]
     if detector.nc <= COCO_BIRD_CLASS_ID:
         raise ValueError(
@@ -179,7 +173,7 @@ def download(url: str, destination: Path, expected_sha256: str) -> None:
 def export_detector(
     destination: Path,
     *,
-    input_size: int = DETECTOR_INPUT_SIZE,
+    input_shape: tuple[int, int] = DETECTOR_INPUT_SHAPE,
     calibration_data: Path | None = None,
 ) -> None:
     """Export a bird-only YOLO26s model as a static batch-one INT8 OpenVINO IR."""
@@ -189,17 +183,22 @@ def export_detector(
         return
     if calibration_data is None:
         raise ValueError("INT8 OpenVINO export requires calibration data")
+    height, width = input_shape
+    if height % 32 or width % 32:
+        raise ValueError("Detector input dimensions must be divisible by 32")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    source = destination.parent / DETECTOR_SOURCE
+    source = development_weights_dir(destination.parent.parent) / "detector" / DETECTOR_SOURCE
     download(DETECTOR_SOURCE_URL, source, DETECTOR_SOURCE_SHA256)
-    print(f"Exporting YOLO26s OpenVINO INT8 at {input_size}x{input_size} ...")
+    print(f"Exporting YOLO26s OpenVINO INT8 at {height}x{width} ...")
+    from ultralytics import YOLO  # noqa: PLC0415 -- model-export dependency only
+
     model = YOLO(str(source))
-    bird_only_detector(model)
+    bird_only_detector(cast(BirdOnlyYoloModel, model))
     exported = Path(
         model.export(
             format="openvino",
-            imgsz=input_size,
+            imgsz=input_shape,
             quantize=8,
             dynamic=False,
             batch=1,
@@ -217,15 +216,11 @@ def export_detector(
 def prepare_models(
     weights_dir: Path,
     *,
-    input_size: int = DETECTOR_INPUT_SIZE,
     calibration_data: Path | None = None,
 ) -> None:
-    """Prepare all artifacts required by the runtime."""
+    """Prepare the active detector artifact."""
 
     export_detector(
         detector_path(weights_dir),
-        input_size=input_size,
         calibration_data=calibration_data,
     )
-    download(EDGE_ENCODER_URL, edge_encoder_path(weights_dir), EDGE_ENCODER_SHA256)
-    download(EDGE_DECODER_URL, edge_decoder_path(weights_dir), EDGE_DECODER_SHA256)

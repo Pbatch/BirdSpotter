@@ -50,12 +50,13 @@ class OpenVinoDetectorBackend:
 
 def letterbox(
     image_bgr: np.ndarray,
-    size: int,
+    shape: tuple[int, int],
 ) -> tuple[np.ndarray, float, tuple[int, int]]:
-    """Resize and pad an image to a square while preserving its aspect ratio."""
+    """Resize and pad an image to an HxW shape while preserving its aspect ratio."""
 
     height, width = image_bgr.shape[:2]
-    scale = min(size / width, size / height)
+    target_height, target_width = shape
+    scale = min(target_width / width, target_height / height)
     resized_width = max(1, round(width * scale))
     resized_height = max(1, round(height * scale))
     resized = cv2.resize(
@@ -63,9 +64,9 @@ def letterbox(
         (resized_width, resized_height),
         interpolation=cv2.INTER_LINEAR,
     )
-    pad_x = (size - resized_width) // 2
-    pad_y = (size - resized_height) // 2
-    canvas = np.full((size, size, 3), 114, dtype=np.uint8)
+    pad_x = (target_width - resized_width) // 2
+    pad_y = (target_height - resized_height) // 2
+    canvas = np.full((target_height, target_width, 3), 114, dtype=np.uint8)
     canvas[pad_y : pad_y + resized_height, pad_x : pad_x + resized_width] = resized
     return canvas, scale, (pad_x, pad_y)
 
@@ -95,11 +96,10 @@ class BirdDetector:
         model_path: Path,
         *,
         confidence: float = 0.10,
-        input_size: int | None = None,
     ) -> None:
         if not model_path.is_dir():
             raise FileNotFoundError(
-                f"Detector model not found: {model_path}. Run `birdspotter models`."
+                f"Detector model not found: {model_path}. Run `python scripts/export_models.py`."
             )
         if not 0 <= confidence <= 1:
             raise ValueError("Detector confidence must be between 0 and 1")
@@ -109,20 +109,14 @@ class BirdDetector:
         self.backend = OpenVinoDetectorBackend(model_path)
         model_height, model_width = self.backend.input_shape[-2:]
         if not isinstance(model_height, int) or not isinstance(model_width, int):
-            raise TypeError("Detector must have a fixed square input shape")
-        if model_height != model_width:
-            raise RuntimeError(f"Detector input is not square: {self.backend.input_shape}")
-        if input_size is not None and input_size != model_height:
-            raise ValueError(
-                f"Configured detector input {input_size} does not match model {model_height}"
-            )
-        self.input_size = model_height
+            raise TypeError("Detector must have a fixed input shape")
+        self.input_shape = (model_height, model_width)
 
     def detect(self, image_bgr: np.ndarray) -> list[Detection]:
         if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
             raise TypeError("Detector input must be an HxWx3 BGR image")
 
-        prepared, scale, padding = letterbox(image_bgr, self.input_size)
+        prepared, scale, padding = letterbox(image_bgr, self.input_shape)
         tensor = prepared[:, :, ::-1].transpose(2, 0, 1)
         tensor = np.ascontiguousarray(tensor[None], dtype=np.float32) / 255.0
         output = self.backend.run(tensor)
@@ -131,7 +125,7 @@ class BirdDetector:
         if rows.ndim != 2 or rows.shape[1] < 6:
             raise RuntimeError(
                 f"Unexpected detector output shape {np.asarray(output).shape}; "
-                "prepare the detector with `birdspotter models`"
+                "prepare the detector with `python scripts/export_models.py`"
             )
 
         detections: list[Detection] = []
@@ -154,7 +148,7 @@ class BirdDetector:
 
         return {
             "model": self.model_path.name,
-            "input_size": self.input_size,
+            "input_shape": self.input_shape,
             "confidence_threshold": self.confidence,
             "bird_class_id": COCO_BIRD_CLASS_ID,
             "model_output_class_id": DETECTOR_BIRD_CLASS_ID,

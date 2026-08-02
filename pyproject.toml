@@ -6,15 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy==2.4.2",
-    "onnxruntime==1.28.0",
     "opencv-python-headless==4.14.0.94",
     "openvino==2026.2.1",
-    "timm==1.0.28",
-    "ultralytics==8.4.115",
 ]
-
-[project.scripts]
-birdspotter = "birdspotter.cli:main"
 
 [dependency-groups]
 dev = [
@@ -25,6 +19,8 @@ dev = [
 ]
 model-export = [
     "nncf==3.2.0",
+    "timm==1.0.28",
+    "ultralytics==8.4.115",
 ]
 
 [build-system]
@@ -45,16 +41,12 @@ line-length = 100
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "C901",    # Existing webcam orchestration complexity
     "COM812",  # Conflicts with the formatter
     "CPY001",  # Copyright headers are not required
     "D",       # Public API docstrings are not mandatory
     "EM",      # Inline exception messages are clearer here
     "INP001",  # scripts and tests are intentionally not packages
     "ISC001",  # Conflicts with the formatter
-    "PLR0912", # Existing webcam orchestration branches
-    "PLR0913", # CLI-to-pipeline configuration is explicit
-    "PLR0915", # Existing webcam orchestration statements
     "PLR2004", # Image dimensions and model shapes use meaningful literals
     "T201",    # This is a console application
     "TC",      # Runtime imports keep annotations straightforward

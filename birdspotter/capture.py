@@ -19,30 +19,16 @@ class CapturedFrame:
     image_bgr: np.ndarray
 
 
-def center_square_crop(image_bgr: np.ndarray) -> np.ndarray:
-    """Return the centered square region of an HxWxC camera frame."""
-
-    if image_bgr.ndim != 3:
-        raise TypeError("Camera frame must be an HxWxC image")
-    height, width = image_bgr.shape[:2]
-    side = min(height, width)
-    if side == 0:
-        raise ValueError("Camera frame must not be empty")
-    x_start = (width - side) // 2
-    y_start = (height - side) // 2
-    return image_bgr[y_start : y_start + side, x_start : x_start + side]
-
-
 class LatestFrameCamera:
-    """Read and centre-crop camera frames so inference never accumulates stale frames."""
+    """Read full camera frames so inference never accumulates stale frames."""
 
     def __init__(
         self,
         device: int = 0,
         *,
-        width: int = 1920,
-        height: int = 1080,
-        fps: int = 30,
+        width: int = 1600,
+        height: int = 896,
+        fps: int = 5,
     ) -> None:
         self.device = device
         self.width = width
@@ -84,7 +70,7 @@ class LatestFrameCamera:
                 if not ok:
                     raise RuntimeError("Camera stopped returning frames")
                 sequence += 1
-                frame = CapturedFrame(sequence, datetime.now(UTC), center_square_crop(image))
+                frame = CapturedFrame(sequence, datetime.now(UTC), image)
                 with self._condition:
                     self._latest = frame
                     self._condition.notify_all()
@@ -124,7 +110,7 @@ class LatestFrameCamera:
             "height": self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT),
             "fps": self._capture.get(cv2.CAP_PROP_FPS),
             "fourcc": fourcc,
-            "output_crop": "center-square",
+            "output_crop": "none",
         }
 
     def __enter__(self) -> Self:
