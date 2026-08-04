@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Self
+from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 import numpy as np
@@ -24,13 +26,13 @@ class LatestFrameCamera:
 
     def __init__(
         self,
-        device: int = 0,
+        source: int | str = 0,
         *,
         width: int = 1600,
         height: int = 896,
         fps: int = 5,
     ) -> None:
-        self.device = device
+        self.source = source
         self.width = width
         self.height = height
         self.fps = fps
@@ -42,17 +44,21 @@ class LatestFrameCamera:
         self._thread: threading.Thread | None = None
 
     def start(self) -> Self:
-        capture = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+        if isinstance(self.source, str):
+            os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+        backend = cv2.CAP_V4L2 if isinstance(self.source, int) else cv2.CAP_FFMPEG
+        capture = cv2.VideoCapture(self.source, backend)
         if not capture.isOpened():
             capture.release()
-            raise RuntimeError(f"Could not open camera /dev/video{self.device}")
-        capture.set(
-            cv2.CAP_PROP_FOURCC,
-            cv2.VideoWriter_fourcc(*"MJPG"),  # ty: ignore[unresolved-attribute]
-        )
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        capture.set(cv2.CAP_PROP_FPS, self.fps)
+            raise RuntimeError(f"Could not open camera {self.source_name()}")
+        if isinstance(self.source, int):
+            capture.set(
+                cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc(*"MJPG"),  # ty: ignore[unresolved-attribute]
+            )
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            capture.set(cv2.CAP_PROP_FPS, self.fps)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._capture = capture
         self._thread = threading.Thread(target=self._reader, name="camera-reader", daemon=True)
@@ -106,12 +112,28 @@ class LatestFrameCamera:
         fourcc_number = int(self._capture.get(cv2.CAP_PROP_FOURCC))
         fourcc = "".join(chr((fourcc_number >> (8 * index)) & 0xFF) for index in range(4))
         return {
+            "source": self.source_name(),
             "width": self._capture.get(cv2.CAP_PROP_FRAME_WIDTH),
             "height": self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT),
             "fps": self._capture.get(cv2.CAP_PROP_FPS),
             "fourcc": fourcc,
             "output_crop": "none",
         }
+
+    def source_name(self) -> str:
+        """Describe the source without exposing RTSP credentials in logs."""
+
+        if isinstance(self.source, int):
+            return f"/dev/video{self.source}"
+        parsed = urlsplit(self.source)
+        if not parsed.scheme or not parsed.hostname:
+            return "remote stream"
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
 
     def __enter__(self) -> Self:
         return self.start()

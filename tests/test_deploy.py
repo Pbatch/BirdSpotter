@@ -3,8 +3,9 @@ from pathlib import Path
 
 import numpy as np
 
+from birdspotter.capture import LatestFrameCamera
 from birdspotter.types import BirdCandidate, Detection
-from scripts.deploy import output_path, rounded_to_five_minutes
+from scripts.deploy import output_path, parse_arguments, rounded_to_five_minutes
 
 
 def test_rounded_to_five_minutes_rounds_half_up_across_an_hour() -> None:
@@ -22,3 +23,16 @@ def test_output_path_contains_percentage_and_rounded_time(tmp_path: Path) -> Non
     )
 
     assert output_path(tmp_path, candidate) == tmp_path / "bird_conf_82_ts_2026-08-02_12-05.png"
+
+
+def test_rtsp_url_selects_a_network_camera() -> None:
+    args = parse_arguments(["--rtsp-url", "rtsp://camera.example/stream1"])
+
+    assert args.rtsp_url == "rtsp://camera.example/stream1"
+    assert args.device == 0
+
+
+def test_rtsp_source_name_redacts_camera_credentials() -> None:
+    camera = LatestFrameCamera("rtsp://birdspotter:password@192.168.1.42:554/stream1")
+
+    assert camera.source_name() == "rtsp://192.168.1.42:554/stream1"

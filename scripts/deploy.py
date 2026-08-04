@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -81,11 +83,18 @@ def save_candidate(
     return saved
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse deployment configuration from the command line."""
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", type=int, default=0)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--device", type=int, default=0, help="Local V4L2 camera number")
+    source.add_argument(
+        "--rtsp-url",
+        default=os.environ.get("BIRDSPOTTER_RTSP_URL"),
+        metavar="URL",
+        help="RTSP source URL (defaults to the BIRDSPOTTER_RTSP_URL environment variable)",
+    )
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--height", type=int, default=896)
     parser.add_argument("--camera-fps", type=int, default=5)
@@ -97,7 +106,7 @@ def parse_arguments() -> argparse.Namespace:
         type=str.upper,
         help="Journal verbosity (default: %(default)s)",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def update_window_winner(
@@ -220,10 +229,12 @@ def main() -> None:
     segmenter = Sam21OpenVinoSegmenter(sam21_openvino_dir(weights_dir))
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    source = args.rtsp_url if args.rtsp_url is not None else args.device
+    camera_source = LatestFrameCamera(source).source_name()
     logger.info(
-        "Starting BirdSpotter | device={} camera_request={}x{}@{}fps detector_fps={} "
+        "Starting BirdSpotter | source={} camera_request={}x{}@{}fps detector_fps={} "
         "window_minutes={} output_dir={}",
-        args.device,
+        camera_source,
         args.width,
         args.height,
         args.camera_fps,
@@ -235,7 +246,7 @@ def main() -> None:
     logger.debug("Segmenter configuration | {}", segmenter.describe())
 
     with LatestFrameCamera(
-        args.device,
+        source,
         width=args.width,
         height=args.height,
         fps=args.camera_fps,

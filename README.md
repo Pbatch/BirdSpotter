@@ -56,6 +56,21 @@ uses 1088×1920 input and runs once per second. SAM runs once for the strictly
 highest-confidence bird in each five-minute window. Outputs are written to
 `segmented/bird_conf_XX_ts_YYYY-MM-DD_HH-MM.png`.
 
+### Tapo RTSP camera
+
+Create a dedicated Camera Account in the Tapo app, then provide the C120 high-quality
+stream as an environment variable. This keeps the camera password out of the repository
+and command history:
+
+```bash
+export BIRDSPOTTER_RTSP_URL='rtsp://CAMERA_USERNAME:CAMERA_PASSWORD@CAMERA_IP:554/stream1'
+uv run python scripts/deploy.py
+```
+
+`stream1` is the high-quality stream. BirdSpotter preserves its detail while resizing and
+letterboxing every frame to the detector's fixed 1920×1088 input. Use `/stream2` only if
+the Beelink cannot keep up with `/stream1`.
+
 Use `--log-level DEBUG` for per-frame detector timing and selection logs.
 
 ## Tests and checks
