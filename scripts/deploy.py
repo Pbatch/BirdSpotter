@@ -12,7 +12,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from birdspotter.capture import CapturedFrame, LatestFrameCamera
+from birdspotter.capture import Capture, CapturedFrame
 from birdspotter.crop import expanded_crop
 from birdspotter.detection import BirdDetector
 from birdspotter.models import default_weights_dir, detector_path, sam21_openvino_dir
@@ -67,7 +67,7 @@ def save_candidate(
     """Segment and save one selected bird as a transparent PNG."""
 
     started = time.perf_counter()
-    crop, crop_box, _ = expanded_crop(candidate.frame_bgr, candidate.detection.box)
+    crop, crop_box = expanded_crop(candidate.frame_bgr, candidate.detection.box)
     mask, sam_score = segmenter.segment(crop, crop_box)
     saved = write_image(output_path(output_dir, candidate), crop, mask)
     logger.info(
@@ -178,7 +178,7 @@ def save_best_candidate(
 
 
 def run_detection_loop(
-    camera: LatestFrameCamera,
+    camera: Capture,
     detector: BirdDetector,
     segmenter: Sam21OpenVinoSegmenter,
     output_dir: Path,
@@ -230,7 +230,7 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     source = args.rtsp_url if args.rtsp_url is not None else args.device
-    camera_source = LatestFrameCamera(source).source_name()
+    camera_source = Capture(source).source_name()
     logger.info(
         "Starting BirdSpotter | source={} camera_request={}x{}@{}fps detector_fps={} "
         "window_minutes={} output_dir={}",
@@ -245,7 +245,7 @@ def main() -> None:
     logger.debug("Detector configuration | {}", detector.describe())
     logger.debug("Segmenter configuration | {}", segmenter.describe())
 
-    with LatestFrameCamera(
+    with Capture(
         source,
         width=args.width,
         height=args.height,

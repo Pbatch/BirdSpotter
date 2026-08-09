@@ -137,9 +137,7 @@ class BirdDetector:
             box = restore_box(row[:4], scale, padding, image_bgr.shape)
             if box[2] <= box[0] or box[3] <= box[1]:
                 continue
-            detections.append(
-                Detection(box=box, confidence=confidence, class_id=COCO_BIRD_CLASS_ID)
-            )
+            detections.append(Detection(box=box, confidence=confidence))
 
         return sorted(detections, key=lambda detection: detection.confidence, reverse=True)
 

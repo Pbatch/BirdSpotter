@@ -1,4 +1,4 @@
-"""Low-latency webcam capture that always exposes the newest decoded frame."""
+"""Low-latency webcam capture that exposes a recent frame once per second."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from urllib.parse import urlsplit, urlunsplit
 import cv2
 import numpy as np
 
+DECODE_INTERVAL_SECONDS = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class CapturedFrame:
@@ -21,8 +23,8 @@ class CapturedFrame:
     image_bgr: np.ndarray
 
 
-class LatestFrameCamera:
-    """Read full camera frames so inference never accumulates stale frames."""
+class Capture:
+    """Drain camera frames and expose one newly decoded frame per second."""
 
     def __init__(
         self,
@@ -70,11 +72,19 @@ class LatestFrameCamera:
         if capture is None:
             raise RuntimeError("Camera has not been started")
         sequence = 0
+        next_decode = time.monotonic() + DECODE_INTERVAL_SECONDS
         try:
             while not self._stopping.is_set():
+                if time.monotonic() < next_decode:
+                    if not capture.grab():
+                        raise RuntimeError("Camera stopped returning frames")
+                    continue
+
+                # read() grabs the frame after those drained above, then decodes it.
                 ok, image = capture.read()
                 if not ok:
                     raise RuntimeError("Camera stopped returning frames")
+                next_decode = time.monotonic() + DECODE_INTERVAL_SECONDS
                 sequence += 1
                 frame = CapturedFrame(sequence, datetime.now(UTC), image)
                 with self._condition:

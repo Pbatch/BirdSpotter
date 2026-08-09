@@ -12,7 +12,7 @@ def expanded_crop(
     box: Box,
     *,
     margin_fraction: float = 0.15,
-) -> tuple[np.ndarray, Box, tuple[int, int, int, int]]:
+) -> tuple[np.ndarray, Box]:
     """Crop around a detection and translate its box into crop coordinates."""
 
     height, width = image_bgr.shape[:2]
@@ -31,8 +31,4 @@ def expanded_crop(
         x2 - crop_x1,
         y2 - crop_y1,
     )
-    return (
-        image_bgr[crop_y1:crop_y2, crop_x1:crop_x2].copy(),
-        local_box,
-        (crop_x1, crop_y1, crop_x2, crop_y2),
-    )
+    return image_bgr[crop_y1:crop_y2, crop_x1:crop_x2].copy(), local_box

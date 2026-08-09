@@ -16,7 +16,6 @@ class Detection:
 
     box: Box
     confidence: float
-    class_id: int
 
 
 @dataclass(slots=True)

@@ -65,7 +65,7 @@ def main() -> None:
         if not cv2.imwrite(str(annotation_path), annotation):
             raise OSError(f"Failed to write annotation: {annotation_path}")
 
-        crop, crop_box, _ = expanded_crop(image, detection.box)
+        crop, crop_box = expanded_crop(image, detection.box)
         mask, _ = segmenter.segment(crop, crop_box)
         segmentation_path = SEGMENTATIONS_DIR / image_path.name
         write_image(segmentation_path, crop, mask)

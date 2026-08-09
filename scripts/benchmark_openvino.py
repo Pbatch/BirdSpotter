@@ -72,7 +72,7 @@ def main() -> None:
     detections = detector.detect(image)
     if not detections:
         raise RuntimeError("Benchmark image contains no detected bird")
-    crop, crop_box, _ = expanded_crop(image, detections[0].box)
+    crop, crop_box = expanded_crop(image, detections[0].box)
 
     benchmark("detector OpenVINO", lambda: detector.backend.run(detector_tensor), runs=args.runs)
     benchmark(
@@ -86,7 +86,7 @@ def main() -> None:
 
     def detector_plus_sam() -> None:
         current_detection = detector.detect(image)[0]
-        current_crop, current_box, _ = expanded_crop(image, current_detection.box)
+        current_crop, current_box = expanded_crop(image, current_detection.box)
         segmenter.segment(current_crop, current_box)
 
     benchmark("detector plus SAM", detector_plus_sam, runs=max(1, args.runs // 2))

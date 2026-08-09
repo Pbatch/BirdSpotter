@@ -52,9 +52,10 @@ uv run python scripts/deploy.py
 ```
 
 By default, the camera is requested at 1600×896 MJPEG and 5 fps; the detector
-uses 1088×1920 input and runs once per second. SAM runs once for the strictly
-highest-confidence bird in each five-minute window. Outputs are written to
-`segmented/bird_conf_XX_ts_YYYY-MM-DD_HH-MM.png`.
+uses 1088×1920 input and runs once per second. The capture loop drains intervening
+frames without retrieving them and decodes the next frame once per second. SAM runs
+once for the strictly highest-confidence bird in each five-minute window. Outputs are
+written to `segmented/bird_conf_XX_ts_YYYY-MM-DD_HH-MM.png`.
 
 ### Tapo RTSP camera
 
