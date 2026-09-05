@@ -14,7 +14,13 @@ from birdspotter.types import Detection
 
 
 class OpenVinoDetectorBackend:
-    def __init__(self, model_path: Path) -> None:
+    def __init__(
+        self,
+        model_path: Path,
+        *,
+        device: str = "CPU",
+        performance_hint: str = "LATENCY",
+    ) -> None:
         model_files = sorted(model_path.glob("*.xml"))
         if len(model_files) != 1:
             raise FileNotFoundError(f"Expected one OpenVINO XML model in {model_path}")
@@ -31,10 +37,12 @@ class OpenVinoDetectorBackend:
         self.input_shape = tuple(model_input.shape)
         self.compiled_model = core.compile_model(
             model,
-            "CPU",
-            {"PERFORMANCE_HINT": "LATENCY"},
+            device,
+            {"PERFORMANCE_HINT": performance_hint},
         )
         self.output = self.compiled_model.output(0)
+        self.device = device
+        self.performance_hint = performance_hint
 
     def run(self, tensor: np.ndarray) -> np.ndarray:
         return np.asarray(self.compiled_model([tensor])[self.output])
@@ -43,8 +51,8 @@ class OpenVinoDetectorBackend:
         return {
             "backend": "OpenVINO",
             "precision": "INT8",
-            "device": "CPU",
-            "performance_hint": "LATENCY",
+            "device": self.device,
+            "performance_hint": self.performance_hint,
         }
 
 
@@ -99,7 +107,7 @@ class BirdDetector:
     ) -> None:
         if not model_path.is_dir():
             raise FileNotFoundError(
-                f"Detector model not found: {model_path}. Run `python scripts/export_models.py`."
+                f"Detector model not found: {model_path}. Run `python scripts/ml/export_models.py`."
             )
         if not 0 <= confidence <= 1:
             raise ValueError("Detector confidence must be between 0 and 1")
@@ -125,7 +133,7 @@ class BirdDetector:
         if rows.ndim != 2 or rows.shape[1] < 6:
             raise RuntimeError(
                 f"Unexpected detector output shape {np.asarray(output).shape}; "
-                "prepare the detector with `python scripts/export_models.py`"
+                "prepare the detector with `python scripts/ml/export_models.py`"
             )
 
         detections: list[Detection] = []

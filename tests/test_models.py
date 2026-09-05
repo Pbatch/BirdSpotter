@@ -2,20 +2,28 @@ from pathlib import Path
 
 import pytest
 
-from birdspotter import models
+from birdspotter.ml import checkpoints
 
 
-def test_prepare_sam21_checkpoint_downloads_to_development_weights(
+def test_sam21_checkpoint_uses_ultralytics_filename(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls: list[tuple[str, Path, str]] = []
+    source = tmp_path / checkpoints.SAM21_SOURCE_FILENAME
+    source.write_bytes(b"checkpoint")
+    calls: list[tuple[str, str]] = []
 
-    def record_download(url: str, destination: Path, expected_sha256: str) -> None:
-        calls.append((url, destination, expected_sha256))
+    def record_download(*, repo_id: str, filename: str) -> str:
+        calls.append((repo_id, filename))
+        return str(source)
 
-    monkeypatch.setattr(models, "download", record_download)
+    monkeypatch.setattr(checkpoints, "hf_hub_download", record_download)
+    monkeypatch.setattr(checkpoints, "SAM21_SOURCE_SHA256", checkpoints.sha256(source))
 
-    checkpoint = models.prepare_sam21_checkpoint(tmp_path / "weights")
+    with checkpoints.sam21_checkpoint() as checkpoint:
+        assert checkpoint.name == "sam2.1_l.pt"
+        assert checkpoint.is_symlink()
+        assert checkpoint.resolve() == source
+        temporary_parent = checkpoint.parent
 
-    assert checkpoint == tmp_path / "weights_dev" / "sam2.1" / "sam2.1_l.pt"
-    assert calls == [(models.SAM21_SOURCE_URL, checkpoint, models.SAM21_SOURCE_SHA256)]
+    assert not temporary_parent.exists()
+    assert calls == [(checkpoints.SAM21_SOURCE_REPOSITORY, checkpoints.SAM21_SOURCE_FILENAME)]

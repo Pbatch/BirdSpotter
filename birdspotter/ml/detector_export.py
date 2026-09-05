@@ -1,27 +1,24 @@
-"""Export-only conversion of YOLO26s into the bird-only OpenVINO detector."""
+"""Export a pretrained or fine-tuned YOLO26 bird detector to OpenVINO."""
 
 from __future__ import annotations
 
 import shutil
-from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Protocol, cast
+
+import torch
+from huggingface_hub import hf_hub_download
+from ultralytics import YOLO
 
 from birdspotter.models import (
     COCO_BIRD_CLASS_ID,
     DETECTOR_BIRD_CLASS_ID,
     DETECTOR_BIRD_CLASS_NAME,
-    development_weights_dir,
-    download,
 )
 
-if TYPE_CHECKING:
-    import torch
-
-DETECTOR_SOURCE = "yolo26s.pt"
-DETECTOR_SOURCE_URL = "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26s.pt"
-DETECTOR_SOURCE_SHA256 = "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b"
-DETECTOR_INPUT_SHAPE = (1088, 1920)
+DETECTOR_SOURCE_REPOSITORY = "PBatch23888/birdspotter-yolo26s"
+DETECTOR_SOURCE_FILENAME = "best.pt"
+DETECTOR_INPUT_SHAPE = (896, 1600)
 
 
 class BirdOnlyDetectionHead(Protocol):
@@ -52,8 +49,6 @@ def convolution_pair(value: tuple[int, ...], *, name: str) -> tuple[int, int]:
 
 def bird_only_detector(model: BirdOnlyYoloModel) -> None:
     """Retain only COCO's pretrained bird classifier in a YOLO detection model."""
-
-    import torch  # noqa: PLC0415 -- export dependency only
 
     detector_model = model.model
     detector = detector_model.model[-1]
@@ -109,25 +104,40 @@ def export_detector(
     *,
     input_shape: tuple[int, int] = DETECTOR_INPUT_SHAPE,
     calibration_data: Path | None = None,
+    calibration_images: int = 500,
+    source_checkpoint: Path | None = None,
 ) -> None:
-    """Export a bird-only YOLO26s model as a static batch-one INT8 OpenVINO IR."""
+    """Export a bird-only YOLO26 model as a static batch-one INT8 OpenVINO IR."""
 
-    if destination.is_dir() and any(destination.glob("*.xml")):
+    if source_checkpoint is None and destination.is_dir() and any(destination.glob("*.xml")):
         print(f"Already present: {destination}")
         return
     if calibration_data is None:
         raise ValueError("INT8 OpenVINO export requires calibration data")
+    if calibration_images < 1:
+        raise ValueError("INT8 OpenVINO export requires at least one calibration image")
     height, width = input_shape
     if height % 32 or width % 32:
         raise ValueError("Detector input dimensions must be divisible by 32")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    source = development_weights_dir(destination.parent.parent) / "detector" / DETECTOR_SOURCE
-    download(DETECTOR_SOURCE_URL, source, DETECTOR_SOURCE_SHA256)
-    print(f"Exporting YOLO26s OpenVINO INT8 at {height}x{width} ...")
-    yolo_module = cast(Any, import_module("ultralytics"))
-    model = yolo_module.YOLO(str(source))
-    bird_only_detector(cast(BirdOnlyYoloModel, model))
+    source = source_checkpoint
+    if source is None:
+        source = Path(
+            hf_hub_download(
+                repo_id=DETECTOR_SOURCE_REPOSITORY,
+                filename=DETECTOR_SOURCE_FILENAME,
+            )
+        )
+    elif not source.is_file():
+        raise FileNotFoundError(f"Detector checkpoint not found: {source}")
+    print(f"Exporting {source.name} OpenVINO INT8 at {height}x{width} ...")
+    model = YOLO(str(source))
+    detector_model = cast(BirdOnlyYoloModel, model).model
+    if len(detector_model.names) == 1:
+        detector_model.names = {DETECTOR_BIRD_CLASS_ID: DETECTOR_BIRD_CLASS_NAME}
+    else:
+        bird_only_detector(cast(BirdOnlyYoloModel, model))
     exported = Path(
         model.export(
             format="openvino",
@@ -138,9 +148,29 @@ def export_detector(
             nms=False,
             device="cpu",
             data=str(calibration_data) if calibration_data is not None else None,
+            fraction=calibration_images,
         )
     )
     if not exported.is_dir() or not any(exported.glob("*.xml")):
         raise RuntimeError(f"Ultralytics reported an invalid OpenVINO export: {exported}")
-    shutil.move(str(exported), destination)
+    replace_export(exported, destination)
     print(f"Saved OpenVINO detector: {destination}")
+
+
+def replace_export(exported: Path, destination: Path) -> None:
+    """Replace an existing detector export while preserving it if the move fails."""
+
+    if not destination.exists():
+        shutil.move(str(exported), destination)
+        return
+
+    backup = destination.with_name(f".{destination.name}.previous")
+    if backup.exists():
+        shutil.rmtree(backup)
+    destination.replace(backup)
+    try:
+        shutil.move(str(exported), destination)
+    except Exception:
+        backup.replace(destination)
+        raise
+    shutil.rmtree(backup)

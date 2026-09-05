@@ -8,6 +8,7 @@ import sys
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from importlib.resources import files
 from pathlib import Path
 
 from loguru import logger
@@ -15,6 +16,7 @@ from loguru import logger
 from birdspotter.capture import Capture, CapturedFrame
 from birdspotter.crop import expanded_crop
 from birdspotter.detection import BirdDetector
+from birdspotter.gallery import DEFAULT_GALLERY_HOST, start_gallery_server
 from birdspotter.models import default_weights_dir, detector_path, sam21_openvino_dir
 from birdspotter.output import write_image
 from birdspotter.sam21_openvino import Sam21OpenVinoSegmenter
@@ -99,6 +101,10 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=896)
     parser.add_argument("--camera-fps", type=int, default=5)
     parser.add_argument("--output-dir", type=Path, default=Path("segmented"))
+    parser.add_argument(
+        "--web-host", default=DEFAULT_GALLERY_HOST, help="Gallery server bind address"
+    )
+    parser.add_argument("--web-port", type=int, default=8080, help="Gallery server port")
     parser.add_argument(
         "--log-level",
         choices=LOG_LEVELS,
@@ -229,6 +235,17 @@ def main() -> None:
     segmenter = Sam21OpenVinoSegmenter(sam21_openvino_dir(weights_dir))
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    gallery_server = start_gallery_server(
+        output_dir,
+        args.web_host,
+        args.web_port,
+        icon_path=Path(str(files("birdspotter").joinpath("static", "icon.png"))),
+    )
+    logger.info(
+        "Gallery server | address=http://{}:{} latest=10",
+        args.web_host,
+        gallery_server.server_port,
+    )
     source = args.rtsp_url if args.rtsp_url is not None else args.device
     camera_source = Capture(source).source_name()
     logger.info(
@@ -245,15 +262,19 @@ def main() -> None:
     logger.debug("Detector configuration | {}", detector.describe())
     logger.debug("Segmenter configuration | {}", segmenter.describe())
 
-    with Capture(
-        source,
-        width=args.width,
-        height=args.height,
-        fps=args.camera_fps,
-    ) as camera:
-        logger.info("Camera settings | {}", camera.actual_settings())
-        best = run_detection_loop(camera, detector, segmenter, output_dir)
-    save_best_candidate(best, segmenter, output_dir, partial_window=True)
+    try:
+        with Capture(
+            source,
+            width=args.width,
+            height=args.height,
+            fps=args.camera_fps,
+        ) as camera:
+            logger.info("Camera settings | {}", camera.actual_settings())
+            best = run_detection_loop(camera, detector, segmenter, output_dir)
+        save_best_candidate(best, segmenter, output_dir, partial_window=True)
+    finally:
+        gallery_server.shutdown()
+        gallery_server.server_close()
 
 
 if __name__ == "__main__":
