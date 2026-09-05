@@ -14,8 +14,8 @@ from birdspotter.types import Box
 SAM21_IMAGE_SIZE = 512
 SAM21_PIXEL_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 SAM21_PIXEL_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
-ENCODER_FILENAME = "sam2.1_image_encoder.xml"
-MASK_PREDICTOR_FILENAME = "sam2.1_mask_predictor.xml"
+ENCODER_FILENAME = "sam21_image_encoder.xml"
+MASK_PREDICTOR_FILENAME = "sam21_mask_predictor.xml"
 
 
 def openvino_paths(model_dir: Path) -> tuple[Path, Path]:
@@ -80,7 +80,7 @@ class Sam21OpenVinoSegmenter:
         if missing:
             raise FileNotFoundError(
                 "SAM 2.1 OpenVINO model not found: "
-                f"{missing[0]}. Run `python scripts/export_models.py`."
+                f"{missing[0]}. Run `python scripts/ml/export_models.py`."
             )
         self.encoder_path = encoder_path
         self.mask_predictor_path = mask_predictor_path

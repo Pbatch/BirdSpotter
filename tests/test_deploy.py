@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 
 from birdspotter.capture import Capture
+from birdspotter.gallery import DEFAULT_GALLERY_HOST
 from birdspotter.types import BirdCandidate, Detection
 from scripts.deploy import output_path, parse_arguments, rounded_to_five_minutes
 
@@ -30,6 +31,8 @@ def test_rtsp_url_selects_a_network_camera() -> None:
 
     assert args.rtsp_url == "rtsp://camera.example/stream1"
     assert args.device == 0
+    assert args.web_host == DEFAULT_GALLERY_HOST
+    assert args.web_port == 8080
 
 
 def test_rtsp_source_name_redacts_camera_credentials() -> None:
