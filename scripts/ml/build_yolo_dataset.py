@@ -13,6 +13,7 @@ import time
 import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -26,9 +27,6 @@ from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True  # ty: ignore[invalid-assignment]
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "data" / "processed" / "yolo_birds_1600x896"
-META = OUT / ".metadata"
-SIZE = (1600, 896)
 UA = "BirdSpotter-dataset-builder/2.0"
 S = requests.Session()
 S.headers["User-Agent"] = UA
@@ -36,6 +34,20 @@ SEEN = set()
 LOCK = threading.Lock()
 WORKERS = 12
 Box = tuple[float, float, float, float]
+
+
+@dataclass(slots=True)
+class BuildConfig:
+    output_dir: Path
+    source_cache: Path
+    size: tuple[int, int]
+
+
+CONFIG = BuildConfig(
+    output_dir=ROOT / "data" / "processed" / "yolo_birds_1600x896",
+    source_cache=ROOT / "data" / "processed" / "yolo_birds_1600x896" / ".metadata",
+    size=(1600, 896),
+)
 
 
 def fetch(url: str, path: Path) -> Path:
@@ -62,11 +74,11 @@ def split(source: str, key: str) -> str:
 
 def letterbox(im: Image.Image, boxes: list[Box]) -> tuple[Image.Image, list[Box]]:
     im = im.convert("RGB")
-    tw, th = SIZE
+    tw, th = CONFIG.size
     scale = min(tw / im.width, th / im.height)
     rw, rh = round(im.width * scale), round(im.height * scale)
     px, py = (tw - rw) // 2, (th - rh) // 2
-    canvas = Image.new("RGB", SIZE, (114, 114, 114))
+    canvas = Image.new("RGB", CONFIG.size, (114, 114, 114))
     canvas.paste(im.resize((rw, rh), Image.Resampling.LANCZOS), (px, py))
     out = []
     for x1, y1, x2, y2 in boxes:
@@ -93,8 +105,8 @@ def save(  # noqa: PLR0913
     sp = split(source, key)
     digest = hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest()[:16]
     stem = f"{source}_{digest}"
-    ip = OUT / "images" / sp / f"{stem}.jpg"
-    lp = OUT / "labels" / sp / f"{stem}.txt"
+    ip = CONFIG.output_dir / "images" / sp / f"{stem}.jpg"
+    lp = CONFIG.output_dir / "labels" / sp / f"{stem}.txt"
     if not (ip.exists() and lp.exists()):
         im, boxes = letterbox(im, boxes)
         if not boxes:
@@ -102,15 +114,16 @@ def save(  # noqa: PLR0913
         ti = ip.with_suffix(".part")
         tl = lp.with_suffix(".part")
         im.save(ti, "JPEG", quality=92)
+        width, height = CONFIG.size
         tl.write_text(
             "\n".join(
                 " ".join(
                     (
                         "0",
-                        f"{(a + c) / 3200:.8f}",
-                        f"{(b + d) / 1792:.8f}",
-                        f"{(c - a) / 1600:.8f}",
-                        f"{(d - b) / 896:.8f}",
+                        f"{(a + c) / (2 * width):.8f}",
+                        f"{(b + d) / (2 * height):.8f}",
+                        f"{(c - a) / width:.8f}",
+                        f"{(d - b) / height:.8f}",
                     )
                 )
                 for a, b, c, d in boxes
@@ -126,7 +139,7 @@ def save(  # noqa: PLR0913
             m.write(
                 json.dumps(
                     {
-                        "image": str(ip.relative_to(OUT)),
+                        "image": str(ip.relative_to(CONFIG.output_dir)),
                         "split": sp,
                         "source": source,
                         "source_id": key,
@@ -151,9 +164,9 @@ def openimages(m: TextIO, limit: int | None) -> None:
     # FiftyOne provides the optimized, resized (max dimension 1024) Open Images
     # zoo download path. We still pre-read annotations so images with any
     # group/depiction Bird box are excluded before their pixels are downloaded.
-    os.environ.setdefault("FIFTYONE_DATASET_ZOO_DIR", str(META / "fiftyone-zoo"))
-    os.environ.setdefault("FIFTYONE_DATABASE_DIR", str(META / "fiftyone-db"))
-    fo.config.dataset_zoo_dir = str(META / "fiftyone-zoo")
+    os.environ.setdefault("FIFTYONE_DATASET_ZOO_DIR", str(CONFIG.source_cache / "fiftyone-zoo"))
+    os.environ.setdefault("FIFTYONE_DATABASE_DIR", str(CONFIG.source_cache / "fiftyone-db"))
+    fo.config.dataset_zoo_dir = str(CONFIG.source_cache / "fiftyone-zoo")
     urls = {
         "train": "https://storage.googleapis.com/openimages/v6/oidv6-train-annotations-bbox.csv",
         "validation": "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv",
@@ -163,7 +176,7 @@ def openimages(m: TextIO, limit: int | None) -> None:
     for rs, url in urls.items():
         good = defaultdict(list)
         bad = set()
-        with fetch(url, META / f"openimages-{rs}.csv").open(newline="") as f:
+        with fetch(url, CONFIG.source_cache / f"openimages-{rs}.csv").open(newline="") as f:
             for r in csv.DictReader(f):
                 if r["LabelName"] != "/m/015p6":
                     continue
@@ -205,7 +218,8 @@ def openimages(m: TextIO, limit: int | None) -> None:
 
 def coco(m: TextIO, limit: int | None) -> None:  # noqa: C901
     z = fetch(
-        "http://images.cocodataset.org/annotations/annotations_trainval2017.zip", META / "coco.zip"
+        "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+        CONFIG.source_cache / "coco.zip",
     )
     n = 0
     with zipfile.ZipFile(z) as f:
@@ -281,14 +295,14 @@ def voc(m: TextIO, limit: int | None) -> None:
 
 def birdsnap(m: TextIO, limit: int | None) -> None:  # noqa: C901
     os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
-    os.environ["HF_HOME"] = str(META / "huggingface-cache")
-    os.environ["HF_XET_CACHE"] = str(META / "huggingface-cache" / "xet")
+    os.environ["HF_HOME"] = str(CONFIG.source_cache / "huggingface-cache")
+    os.environ["HF_XET_CACHE"] = str(CONFIG.source_cache / "huggingface-cache" / "xet")
     snapshot = Path(
         snapshot_download(
             repo_id="HuggingFaceM4/Birdsnap",
             repo_type="dataset",
             allow_patterns=["images/*.tar", "annotations.tar.gz"],
-            local_dir=META / "birdsnap-xet",
+            local_dir=CONFIG.source_cache / "birdsnap-xet",
             max_workers=16,
         )
     )
@@ -360,7 +374,7 @@ def birdsnap(m: TextIO, limit: int | None) -> None:  # noqa: C901
 def nabirds(m: TextIO, limit: int | None) -> None:
     p = fetch(
         "https://raw.githubusercontent.com/Rice-Field/NABirds/master/bounding_boxes.txt",
-        META / "nabirds-boxes.txt",
+        CONFIG.source_cache / "nabirds-boxes.txt",
     )
     boxes = {}
     for line in p.read_text().splitlines():
@@ -382,17 +396,43 @@ def nabirds(m: TextIO, limit: int | None) -> None:
 def main() -> None:
     names = ["openimages", "coco2017", "voc2012", "birdsnap", "nabirds"]
     p = argparse.ArgumentParser()
+    p.add_argument("--output-dir", required=True, type=Path)
+    p.add_argument("--width", required=True, type=int)
+    p.add_argument("--height", required=True, type=int)
+    p.add_argument(
+        "--source-cache",
+        type=Path,
+        default=CONFIG.source_cache,
+        help="Cache of original source images and annotations (default: %(default)s)",
+    )
     p.add_argument("--sources", nargs="+", choices=names, default=names)
     p.add_argument("--limit-per-source", type=int)
     a = p.parse_args()
+    if a.width < 1 or a.height < 1:
+        raise ValueError("Output width and height must be positive")
+    CONFIG.output_dir = a.output_dir.resolve()
+    CONFIG.source_cache = a.source_cache.resolve()
+    CONFIG.size = (a.width, a.height)
     for sp in ("train", "val"):
-        (OUT / "images" / sp).mkdir(parents=True, exist_ok=True)
-        (OUT / "labels" / sp).mkdir(parents=True, exist_ok=True)
-    META.mkdir(parents=True, exist_ok=True)
-    (OUT / "data.yaml").write_text(
-        f"path: {OUT}\ntrain: images/train\nval: images/val\nnames:\n  0: bird\n"
+        (CONFIG.output_dir / "images" / sp).mkdir(parents=True, exist_ok=True)
+        (CONFIG.output_dir / "labels" / sp).mkdir(parents=True, exist_ok=True)
+    CONFIG.source_cache.mkdir(parents=True, exist_ok=True)
+    (CONFIG.output_dir / "data.yaml").write_text(
+        f"path: {CONFIG.output_dir}\ntrain: images/train\nval: images/val\nnames:\n  0: bird\n"
     )
-    manifest_path = OUT / "manifest.jsonl"
+    (CONFIG.output_dir / "build-config.json").write_text(
+        json.dumps(
+            {
+                "width": CONFIG.size[0],
+                "height": CONFIG.size[1],
+                "source_cache": str(CONFIG.source_cache),
+                "sources": a.sources,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    manifest_path = CONFIG.output_dir / "manifest.jsonl"
     if manifest_path.exists():
         for line in manifest_path.read_text().splitlines():
             try:
