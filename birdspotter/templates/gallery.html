@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101712">
+  <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="apple-touch-icon" href="/icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/gallery.css">
+  <script src="/static/gallery.js?v=live-roi-1" defer></script>
+  <title>BirdSpotter</title>
+</head>
+<body>
+  <header>
+    <h1>BirdSpotter</h1>
+    <nav role="tablist" aria-label="BirdSpotter views">
+      <button id="sightings-tab" class="active" role="tab" aria-selected="true">
+        Recent sightings
+      </button>
+      <button id="roi-tab" role="tab" aria-selected="false">Area of interest</button>
+    </nav>
+  </header>
+  <main>
+    <section id="sightings-panel" class="tab-panel">
+      <div id="sightings-grid" class="bird-grid">{% include "sightings.html" %}</div>
+    </section>
+    <section id="roi-panel" class="tab-panel" hidden>
+      <p>Drag over the part of the live camera view that should be checked for birds.</p>
+      <canvas id="roi-view"></canvas>
+      <div class="roi-controls">
+        <button id="roi-apply" disabled>Use selected region</button>
+        <button id="roi-reset">Reset drawing</button>
+        <button id="roi-full">Use full frame</button>
+        <span id="roi-status">Open this tab to load the camera.</span>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

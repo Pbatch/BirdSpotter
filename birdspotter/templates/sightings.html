@@ -1,0 +1,10 @@
+{% for bird in sightings %}
+<figure class="bird-card">
+  <a href="{{ bird.image_url }}">
+    <img src="{{ bird.image_url }}" alt="Bird detected at {{ bird.timestamp }}" loading="lazy">
+  </a>
+  <figcaption>{{ bird.timestamp }} - {{ bird.confidence }}% conf</figcaption>
+</figure>
+{% else %}
+<p class="empty">Waiting for the first bird detection&hellip;</p>
+{% endfor %}
