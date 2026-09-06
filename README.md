@@ -64,10 +64,16 @@ frames without retrieving them and decodes the next frame once per second. SAM r
 once for the strictly highest-confidence bird in each five-minute window. Outputs are
 written to `segmented/bird_conf_XX_ts_YYYY-MM-DD_HH-MM.png`.
 
-While deployment is running, a gallery of the 10 most recently saved birds is available
-at `http://HOSTNAME:8080`. The page refreshes every 30 seconds. Use `--web-host` and
-`--web-port` to change the default `0.0.0.0:8080` listener; the gallery has no authentication,
-so expose it only on a trusted network.
+The gallery shows the complete captured frame with the non-segmented region dimmed
+and the detected bird outlined. The original transparent bird cutouts remain in
+`segmented/`; gallery frames are stored in `segmented/gallery/`.
+
+While deployment is running, the web page at `http://HOSTNAME:8080` opens on the 10 most
+recently saved birds. Its **Area of interest** tab shows the live uncropped camera view;
+drag a rectangle and apply it to update the production detection crop immediately. The ROI
+is saved in `segmented/roi.json` and restored after a restart. Choose **Use full frame** to
+clear it. Use `--web-host` and `--web-port` to change the default `0.0.0.0:8080` listener;
+the page has no authentication, so expose it only on a trusted network.
 
 ### Tapo RTSP camera
 

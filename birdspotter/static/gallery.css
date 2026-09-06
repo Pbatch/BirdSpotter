@@ -1,0 +1,25 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: #101712; color: #eff8f1; }
+header { max-width: 1100px; margin: auto; padding: 2rem 1rem 1rem; }
+h1 { margin: 0; font-size: clamp(2rem, 6vw, 4rem); letter-spacing: -.05em; }
+nav { display: flex; gap: .5rem; margin-top: 1.25rem; }
+button { padding: .65rem 1rem; border: 1px solid #526b59; border-radius: .5rem;
+         color: inherit; background: #18221b; font: inherit; cursor: pointer; }
+button.active { border-color: #77c98b; background: #294432; }
+button:disabled { cursor: default; opacity: .55; }
+main { max-width: 1100px; margin: auto; padding: 1rem; }
+.bird-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+             gap: 1rem; }
+.bird-card { margin: 0; overflow: hidden; border: 1px solid #33483a; border-radius: 1rem;
+             background: #18221b; }
+.bird-card a { display: grid; min-height: 240px; place-items: center; background: #dfe7e1; }
+img { display: block; max-width: 100%; max-height: 420px; object-fit: contain; }
+figcaption { padding: .9rem 1rem 1rem; color: #a9baad; white-space: nowrap; }
+.empty { grid-column: 1 / -1; padding: 4rem 1rem; border: 1px dashed #526b59;
+         border-radius: 1rem; color: #a9baad; text-align: center; }
+[hidden] { display: none !important; }
+#roi-view { display: block; width: 100%; height: auto; border: 1px solid #526b59;
+            cursor: crosshair; touch-action: none; }
+.roi-controls { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center;
+                margin-top: 1rem; }
+#roi-status { color: #a9baad; }

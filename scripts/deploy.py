@@ -16,9 +16,14 @@ from loguru import logger
 from birdspotter.capture import Capture, CapturedFrame
 from birdspotter.crop import expanded_crop
 from birdspotter.detection import BirdDetector
-from birdspotter.gallery import DEFAULT_GALLERY_HOST, start_gallery_server
+from birdspotter.gallery import (
+    DEFAULT_GALLERY_HOST,
+    load_roi_config,
+    start_gallery_server,
+    write_roi_config,
+)
 from birdspotter.models import default_weights_dir, detector_path, sam21_openvino_dir
-from birdspotter.output import write_image
+from birdspotter.output import write_gallery_frame, write_image
 from birdspotter.sam21_openvino import Sam21OpenVinoSegmenter
 from birdspotter.types import BirdCandidate
 
@@ -72,6 +77,17 @@ def save_candidate(
     crop, crop_box = expanded_crop(candidate.frame_bgr, candidate.detection.box)
     mask, sam_score = segmenter.segment(crop, crop_box)
     saved = write_image(output_path(output_dir, candidate), crop, mask)
+    crop_origin = (
+        round(candidate.detection.box[0] - crop_box[0]),
+        round(candidate.detection.box[1] - crop_box[1]),
+    )
+    write_gallery_frame(
+        output_dir / "gallery" / saved.name,
+        candidate.frame_bgr,
+        mask,
+        crop_origin,
+        candidate.detection.box,
+    )
     logger.info(
         "Saved bird | frame={} confidence={:.3f} detector_seconds={:.3f} "
         "sam_score={:.3f} segmentation_seconds={:.3f} path={}",
@@ -100,6 +116,13 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--height", type=int, default=896)
     parser.add_argument("--camera-fps", type=int, default=5)
+    parser.add_argument(
+        "--roi",
+        nargs=4,
+        type=int,
+        metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"),
+        help="Crop every decoded camera frame to this pixel ROI before detection",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("segmented"))
     parser.add_argument(
         "--web-host", default=DEFAULT_GALLERY_HOST, help="Gallery server bind address"
@@ -196,6 +219,7 @@ def run_detection_loop(
     next_detection = started
     sequence = 0
     best: BirdCandidate | None = None
+    roi_revision = 0
     while True:
         now = time.monotonic()
         if now < next_detection:
@@ -204,6 +228,10 @@ def run_detection_loop(
 
         frame = camera.newest(after_sequence=sequence)
         sequence = frame.sequence
+        if frame.roi_revision != roi_revision:
+            logger.info("Detection ROI changed | discarding current window candidate")
+            best = None
+            roi_revision = frame.roi_revision
         best = update_window_winner(detector, frame, best)
         # Advance from the prior target time rather than from inference completion.
         # This preserves the requested cadence when inference is fast and naturally
@@ -235,17 +263,10 @@ def main() -> None:
     segmenter = Sam21OpenVinoSegmenter(sam21_openvino_dir(weights_dir))
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    gallery_server = start_gallery_server(
-        output_dir,
-        args.web_host,
-        args.web_port,
-        icon_path=Path(str(files("birdspotter").joinpath("static", "icon.png"))),
-    )
-    logger.info(
-        "Gallery server | address=http://{}:{} latest=10",
-        args.web_host,
-        gallery_server.server_port,
-    )
+    roi_config_path = output_dir / "roi.json"
+    roi = tuple(args.roi) if args.roi is not None else load_roi_config(roi_config_path)
+    if args.roi is not None:
+        write_roi_config(roi_config_path, roi)
     source = args.rtsp_url if args.rtsp_url is not None else args.device
     camera_source = Capture(source).source_name()
     logger.info(
@@ -262,19 +283,33 @@ def main() -> None:
     logger.debug("Detector configuration | {}", detector.describe())
     logger.debug("Segmenter configuration | {}", segmenter.describe())
 
-    try:
-        with Capture(
-            source,
-            width=args.width,
-            height=args.height,
-            fps=args.camera_fps,
-        ) as camera:
+    with Capture(
+        source,
+        width=args.width,
+        height=args.height,
+        fps=args.camera_fps,
+        roi=roi,
+    ) as camera:
+        gallery_server = start_gallery_server(
+            output_dir,
+            args.web_host,
+            args.web_port,
+            icon_path=Path(str(files("birdspotter").joinpath("static", "icon.png"))),
+            camera=camera,
+            roi_config_path=roi_config_path,
+        )
+        logger.info(
+            "Gallery server | address=http://{}:{} latest=10",
+            args.web_host,
+            gallery_server.server_port,
+        )
+        try:
             logger.info("Camera settings | {}", camera.actual_settings())
             best = run_detection_loop(camera, detector, segmenter, output_dir)
-        save_best_candidate(best, segmenter, output_dir, partial_window=True)
-    finally:
-        gallery_server.shutdown()
-        gallery_server.server_close()
+            save_best_candidate(best, segmenter, output_dir, partial_window=True)
+        finally:
+            gallery_server.shutdown()
+            gallery_server.server_close()
 
 
 if __name__ == "__main__":
