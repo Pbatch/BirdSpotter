@@ -8,7 +8,7 @@ It uses a YOLO26s OpenVINO detector followed by SAM 2.1 Large OpenVINO segmentat
 | --- | --- |
 | <img src="demo/annotations/5.png" alt="Bird detection annotation" width="300"> | <img src="demo/segmentations/5.png" alt="Segmented bird" width="300"> |
 
-### Setup
+## Setup
 
 0) Install `uv` (https://docs.astral.sh/uv/getting-started/installation/#standalone-installer)
 1) Sync the dependencies
@@ -20,7 +20,7 @@ uv sync --locked
 uv run python scripts/download_models.py
 ```
 
-### Demo
+## Demo
 
 Regenerate the five demo annotations and segmentations:
 
@@ -28,7 +28,7 @@ Regenerate the five demo annotations and segmentations:
 uv run python scripts/generate_demo.py
 ```
 
-### Deployment
+## Deployment
 
 ```bash
 uv run python scripts/deploy.py
