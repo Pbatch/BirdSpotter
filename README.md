@@ -34,12 +34,11 @@ uv run python scripts/generate_demo.py
 uv run python scripts/deploy.py
 ```
 
-While deployment is running, the web page at `http://HOSTNAME:8080` opens on the 10 most
-recently saved birds. Its **Area of interest** tab shows the live uncropped camera view;
-drag a rectangle and apply it to update the production detection crop immediately. The ROI
-is saved in `segmented/roi.json` and restored after a restart. Choose **Use full frame** to
-clear it. Use `--web-host` and `--web-port` to change the default `0.0.0.0:8080` listener;
-the page has no authentication, so expose it only on a trusted network.
+Deployment creates a web page at `http://HOSTNAME:8080`.
+
+In `Recent sightings`, view the 10 most recently seen birds.
+
+In `Area of interest`, draw the region of interest that detection uses. 
 
 ## Tests and checks
 
