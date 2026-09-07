@@ -2,7 +2,7 @@
 
 BirdSpotter watches a camera, and uses computer vision to make bird cutouts. 
 
-It uses a YOLO26s OpenVINO detector followed by SAM 2.1 Large OpenVINO segmentation.
+It uses YOLO26s followed by SAM 2.1.
 
 | Bird detection | Final transparent bird |
 | --- | --- |
