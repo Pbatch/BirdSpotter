@@ -1,26 +1,63 @@
-"""Small local web gallery for recent BirdSpotter output."""
+"""Starlette web application for sightings and camera ROI selection."""
 
 from __future__ import annotations
 
-import html
 import json
 import re
+import socket
+import time
+from contextlib import suppress
 from datetime import UTC, datetime
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
-from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
+import cv2
+import uvicorn
 from loguru import logger
+from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
+from starlette.templating import Jinja2Templates
+
+from birdspotter.capture import Capture, Roi, crop_to_roi
 
 DEFAULT_GALLERY_LIMIT = 10
 DEFAULT_GALLERY_HOST = "0.0.0.0"  # noqa: S104 - intended for trusted-LAN access
 LONDON_TIMEZONE = ZoneInfo("Europe/London")
+PACKAGE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = PACKAGE_DIR / "static"
+TEMPLATE_DIR = PACKAGE_DIR / "templates"
 BIRD_FILENAME = re.compile(
     r"^bird_conf_(?P<confidence>\d+)_ts_(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2})\.png$"
 )
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
+
+
+def load_roi_config(path: Path) -> Roi | None:
+    """Load a persisted ROI, returning full-frame mode when absent."""
+
+    if not path.is_file():
+        return None
+    data = json.loads(path.read_text())
+    value = data.get("roi")
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != 4 or any(not isinstance(x, int) for x in value):
+        raise ValueError(f"Invalid ROI configuration: {path}")
+    return tuple(value)
+
+
+def write_roi_config(path: Path, roi: Roi | None) -> None:
+    """Atomically persist the production ROI."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".part")
+    temporary.write_text(json.dumps({"roi": roi}, indent=2) + "\n")
+    temporary.replace(path)
 
 
 def london_timestamp(filename_timestamp: str) -> str:
@@ -43,6 +80,33 @@ def recent_birds(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> list[P
         key=lambda path: (path.stat().st_mtime_ns, path.name),
         reverse=True,
     )[:limit]
+
+
+def sighting_context(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> list[dict[str, str]]:
+    """Build template values for the latest sightings."""
+
+    sightings = []
+    for path in recent_birds(output_dir, limit):
+        match = BIRD_FILENAME.fullmatch(path.name)
+        if match is None:  # pragma: no cover - filtered by recent_birds
+            continue
+        gallery_path = output_dir / "gallery" / path.name
+        route = "frames" if gallery_path.is_file() else "birds"
+        sightings.append(
+            {
+                "confidence": match.group("confidence"),
+                "timestamp": london_timestamp(match.group("timestamp")),
+                "image_url": f"/{route}/{path.name}",
+            }
+        )
+    return sightings
+
+
+def render_sightings(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> bytes:
+    """Render only the replaceable recent-sightings card grid contents."""
+
+    template = templates.get_template("sightings.html")
+    return template.render(sightings=sighting_context(output_dir, limit)).encode()
 
 
 def render_manifest() -> bytes:
@@ -71,155 +135,232 @@ def render_manifest() -> bytes:
 
 
 def render_gallery(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> bytes:
-    """Render a self-contained HTML page for the latest bird images."""
+    """Render the complete gallery page outside a request context."""
 
-    cards: list[str] = []
-    for path in recent_birds(output_dir, limit):
-        match = BIRD_FILENAME.fullmatch(path.name)
-        if match is None:  # pragma: no cover - filtered by recent_birds
-            continue
-        confidence = html.escape(match.group("confidence"))
-        timestamp = html.escape(london_timestamp(match.group("timestamp")))
-        image_url = f"/birds/{quote(path.name)}"
-        cards.append(
-            f"""
-            <figure class="bird-card">
-              <a href="{image_url}">
-                <img src="{image_url}" alt="Bird detected at {timestamp}" loading="lazy">
-              </a>
-              <figcaption>
-                {timestamp} - {confidence}% conf
-              </figcaption>
-            </figure>
-            """
+    template = templates.get_template("gallery.html")
+    return template.render(sightings=sighting_context(output_dir, limit)).encode()
+
+
+def require_camera(request: Request) -> Capture:
+    """Return the configured camera or report an unavailable endpoint."""
+
+    camera: Capture | None = request.app.state.camera
+    if camera is None:
+        raise HTTPException(503, "Camera ROI selection is unavailable")
+    return camera
+
+
+def homepage(request: Request) -> Response:
+    """Render the complete sightings and ROI page."""
+
+    return templates.TemplateResponse(
+        request,
+        "gallery.html",
+        {"sightings": sighting_context(request.app.state.output_dir)},
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+def sightings_fragment(request: Request) -> Response:
+    """Render the recent cards for periodic in-page replacement."""
+
+    return templates.TemplateResponse(
+        request,
+        "sightings.html",
+        {"sightings": sighting_context(request.app.state.output_dir)},
+    )
+
+
+def manifest(_: Request) -> Response:
+    """Return the progressive-web-app manifest."""
+
+    return Response(render_manifest(), media_type="application/manifest+json")
+
+
+def icon(request: Request) -> Response:
+    """Return the configured gallery icon."""
+
+    path: Path | None = request.app.state.icon_path
+    if path is None or not path.is_file():
+        raise HTTPException(404)
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+def camera_frame(request: Request) -> Response:
+    """Encode and return the newest uncropped camera frame."""
+
+    frame = require_camera(request).newest_source(timeout=2).image_bgr
+    encoded, payload = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not encoded:
+        raise HTTPException(500, "Could not encode camera frame")
+    return Response(
+        payload.tobytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def roi_state(request: Request) -> Response:
+    """Return the active ROI and uncropped camera dimensions."""
+
+    camera = require_camera(request)
+    frame = camera.newest_source(timeout=2).image_bgr
+    height, width = frame.shape[:2]
+    return JSONResponse({"roi": camera.roi, "width": width, "height": height})
+
+
+async def update_roi(request: Request) -> Response:
+    """Validate, activate, and persist a selected ROI."""
+
+    camera = require_camera(request)
+    config_path: Path | None = request.app.state.roi_config_path
+    if config_path is None:
+        raise HTTPException(503, "Camera ROI selection is unavailable")
+    try:
+        content_length = int(request.headers.get("content-length", "0"))
+    except ValueError as error:
+        raise HTTPException(400, "Invalid request size") from error
+    if content_length < 1 or content_length > 1024:
+        raise HTTPException(400, "Invalid request size")
+    try:
+        data = await request.json()
+        roi: Roi | None = None
+        if data is not None:
+            roi = (
+                int(data["left"]),
+                int(data["top"]),
+                int(data["right"]),
+                int(data["bottom"]),
+            )
+            frame = camera.newest_source(timeout=2).image_bgr
+            crop_to_roi(frame, roi)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise HTTPException(400, str(error)) from error
+    camera.set_roi(roi)
+    write_roi_config(config_path, roi)
+    logger.info("Detection ROI updated | roi={}", roi if roi is not None else "full frame")
+    return JSONResponse({"roi": roi})
+
+
+def output_image(request: Request, *, gallery_frame: bool = False) -> Response:
+    """Safely return a generated image from the requested output collection."""
+
+    filename = request.path_params["filename"]
+    if Path(filename).name != filename or BIRD_FILENAME.fullmatch(filename) is None:
+        raise HTTPException(404)
+    directory: Path = request.app.state.output_dir
+    if gallery_frame:
+        directory = directory / "gallery"
+    directory = directory.resolve()
+    path = directory / filename
+    if path.resolve().parent != directory or not path.is_file():
+        raise HTTPException(404)
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+def bird_image(request: Request) -> Response:
+    """Return a segmented bird image."""
+
+    return output_image(request)
+
+
+def highlighted_frame(request: Request) -> Response:
+    """Return a full frame with the bird highlighted."""
+
+    return output_image(request, gallery_frame=True)
+
+
+def create_gallery_app(
+    output_dir: Path,
+    *,
+    icon_path: Path | None = None,
+    camera: Capture | None = None,
+    roi_config_path: Path | None = None,
+) -> Starlette:
+    """Create a configured Starlette gallery application."""
+
+    routes = [
+        Route("/", homepage, name="home"),
+        Route("/sightings.html", sightings_fragment, name="sightings"),
+        Route("/manifest.webmanifest", manifest, name="manifest"),
+        Route("/icon.png", icon, name="icon"),
+        Route("/camera.jpg", camera_frame, name="camera"),
+        Route("/roi.json", roi_state, name="roi-state"),
+        Route("/roi", update_roi, methods=["POST"], name="roi-update"),
+        Route("/birds/{filename}", bird_image, name="bird"),
+        Route("/frames/{filename}", highlighted_frame, name="frame"),
+        Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
+    ]
+    app = Starlette(routes=routes)
+    app.state.output_dir = output_dir.resolve()
+    app.state.icon_path = icon_path.resolve() if icon_path is not None else None
+    app.state.camera = camera
+    app.state.roi_config_path = roi_config_path.resolve() if roi_config_path is not None else None
+    return app
+
+
+class BirdGalleryServer:
+    """Run the Starlette gallery through Uvicorn in a background thread."""
+
+    def __init__(self, app: Starlette, host: str, port: int) -> None:
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind((host, port))
+        self._socket.listen(128)
+        self.server_port = self._socket.getsockname()[1]
+        config = uvicorn.Config(app, log_config=None, access_log=False, lifespan="off")
+        self._server = uvicorn.Server(config)
+        self._thread = Thread(
+            target=self._server.run,
+            kwargs={"sockets": [self._socket]},
+            name="birdspotter-gallery",
+            daemon=True,
         )
+        self._thread.start()
+        deadline = time.monotonic() + 5
+        while not self._server.started and self._thread.is_alive():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Timed out starting the gallery server")
+            time.sleep(0.01)
+        if not self._thread.is_alive():
+            raise RuntimeError("Gallery server stopped during startup")
 
-    content = "".join(cards)
-    if not content:
-        content = '<p class="empty">Waiting for the first bird detection&hellip;</p>'
+    def shutdown(self) -> None:
+        """Request a graceful server shutdown and wait for its thread."""
 
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="30">
-  <meta name="theme-color" content="#101712">
-  <link rel="icon" type="image/png" href="/icon.png">
-  <link rel="apple-touch-icon" href="/icon.png">
-  <link rel="manifest" href="/manifest.webmanifest">
-  <title>BirdSpotter</title>
-  <style>
-    :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
-    body {{ margin: 0; background: #101712; color: #eff8f1; }}
-    header {{ max-width: 1100px; margin: auto; padding: 2rem 1rem 1rem; }}
-    h1 {{ margin: 0; font-size: clamp(2rem, 6vw, 4rem); letter-spacing: -.05em; }}
-    main {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1rem; max-width: 1100px; margin: auto; padding: 1rem; }}
-    .bird-card {{ margin: 0; overflow: hidden; border: 1px solid #33483a; border-radius: 1rem;
-                  background: #18221b; }}
-    .bird-card a {{ display: grid; min-height: 240px; place-items: center;
-                    background: #dfe7e1; }}
-    img {{ display: block; max-width: 100%; max-height: 420px; object-fit: contain; }}
-    figcaption {{ padding: .9rem 1rem 1rem; color: #a9baad; white-space: nowrap; }}
-    .empty {{ grid-column: 1 / -1; padding: 4rem 1rem; border: 1px dashed #526b59;
-              border-radius: 1rem; color: #a9baad; text-align: center; }}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>BirdSpotter</h1>
-  </header>
-  <main>{content}</main>
-</body>
-</html>
-""".encode()
+        self._server.should_exit = True
+        self._thread.join(timeout=5)
+
+    def server_close(self) -> None:
+        """Close the listening socket when it remains open."""
+
+        with suppress(OSError):
+            self._socket.close()
 
 
-class BirdGalleryServer(ThreadingHTTPServer):
-    """HTTP server carrying the gallery's output directory."""
-
-    daemon_threads = True
-
-    def __init__(
-        self,
-        address: tuple[str, int],
-        output_dir: Path,
-        icon_path: Path | None,
-    ) -> None:
-        self.output_dir = output_dir.resolve()
-        self.icon_path = icon_path.resolve() if icon_path is not None else None
-        super().__init__(address, BirdGalleryRequestHandler)
-
-
-class BirdGalleryRequestHandler(BaseHTTPRequestHandler):
-    """Serve the gallery page and its generated bird images."""
-
-    server: BirdGalleryServer
-
-    def do_GET(self) -> None:
-        request_path = urlsplit(self.path).path
-        if request_path == "/":
-            self._send(render_gallery(self.server.output_dir), "text/html; charset=utf-8")
-            return
-        if request_path == "/manifest.webmanifest":
-            self._send(render_manifest(), "application/manifest+json")
-            return
-        if request_path == "/icon.png":
-            self._send_icon(self.server.icon_path)
-            return
-        if request_path.startswith("/birds/"):
-            self._send_bird(unquote(request_path.removeprefix("/birds/")))
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
-
-    def _send_bird(self, filename: str) -> None:
-        if Path(filename).name != filename or BIRD_FILENAME.fullmatch(filename) is None:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-
-        path = self.server.output_dir / filename
-        try:
-            if path.resolve().parent != self.server.output_dir or not path.is_file():
-                raise FileNotFoundError(filename)
-            body = path.read_bytes()
-        except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        self._send(body, "image/png", cache_control="public, max-age=31536000, immutable")
-
-    def _send_icon(self, path: Path | None) -> None:
-        try:
-            if path is None or not path.is_file():
-                raise FileNotFoundError
-            body = path.read_bytes()
-        except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        self._send(body, "image/png", cache_control="public, max-age=86400")
-
-    def _send(self, body: bytes, content_type: str, *, cache_control: str = "no-store") -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", cache_control)
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        logger.debug("Gallery request | client={} " + format, self.client_address[0], *args)
-
-
-def start_gallery_server(
+def start_gallery_server(  # noqa: PLR0913
     output_dir: Path,
     host: str,
     port: int,
     *,
     icon_path: Path | None = None,
+    camera: Capture | None = None,
+    roi_config_path: Path | None = None,
 ) -> BirdGalleryServer:
-    """Start the gallery server in a background daemon thread."""
+    """Create the Starlette app and run it in a background Uvicorn server."""
 
-    server = BirdGalleryServer((host, port), output_dir, icon_path)
-    thread = Thread(target=server.serve_forever, name="birdspotter-gallery", daemon=True)
-    thread.start()
-    return server
+    app = create_gallery_app(
+        output_dir,
+        icon_path=icon_path,
+        camera=camera,
+        roi_config_path=roi_config_path,
+    )
+    return BirdGalleryServer(app, host, port)

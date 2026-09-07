@@ -103,7 +103,7 @@ class BirdDetector:
         self,
         model_path: Path,
         *,
-        confidence: float = 0.10,
+        confidence: float = 0.50,
     ) -> None:
         if not model_path.is_dir():
             raise FileNotFoundError(

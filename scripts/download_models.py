@@ -15,7 +15,7 @@ from typing import Any
 
 from birdspotter.models import default_weights_dir, detector_path, sam21_openvino_dir
 
-DEFAULT_DETECTOR_REPOSITORY = "PBatch23888/birdspotter-yolo26s"
+DEFAULT_DETECTOR_REPOSITORY = "PBatch23888/birdspotter-yolo26s-640x640"
 DEFAULT_SAM21_REPOSITORY = "PBatch23888/birdspotter-sam21-openvino"
 DEFAULT_REVISION = "main"
 DETECTOR_MODEL_PREFIX = "openvino-int8/"

@@ -38,7 +38,7 @@ UV_PROJECT_ENVIRONMENT=.venv-ml \
   uv run --locked --group ml python scripts/ml/export_models.py
 ```
 
-The exporter reads the fine-tuned YOLO26s checkpoint from its public Hugging Face
+The exporter reads the fine-tuned 640×640 YOLO26s checkpoint from its public Hugging Face
 repository and downloads the SAM 2.1 Large checkpoint, then writes OpenVINO artifacts
 to `weights/`. Source checkpoints remain in the Hugging Face cache.
 Pass `--calibration-data path/to/dataset.yaml` to use different detector calibration
@@ -58,16 +58,22 @@ uv run python scripts/generate_demo.py
 uv run python scripts/deploy.py
 ```
 
-By default, the camera is requested at 1600×896 MJPEG and 5 fps; the detector
-uses the same 1600×896 input resolution and runs once per second. The capture loop drains intervening
+By default, the camera is requested at 1600×896 MJPEG and 5 fps; frames are
+letterboxed to the detector's 640×640 input and inference runs once per second. The capture loop drains intervening
 frames without retrieving them and decodes the next frame once per second. SAM runs
 once for the strictly highest-confidence bird in each five-minute window. Outputs are
 written to `segmented/bird_conf_XX_ts_YYYY-MM-DD_HH-MM.png`.
 
-While deployment is running, a gallery of the 10 most recently saved birds is available
-at `http://HOSTNAME:8080`. The page refreshes every 30 seconds. Use `--web-host` and
-`--web-port` to change the default `0.0.0.0:8080` listener; the gallery has no authentication,
-so expose it only on a trusted network.
+The gallery shows the complete captured frame with the non-segmented region dimmed
+and the detected bird outlined. The original transparent bird cutouts remain in
+`segmented/`; gallery frames are stored in `segmented/gallery/`.
+
+While deployment is running, the web page at `http://HOSTNAME:8080` opens on the 10 most
+recently saved birds. Its **Area of interest** tab shows the live uncropped camera view;
+drag a rectangle and apply it to update the production detection crop immediately. The ROI
+is saved in `segmented/roi.json` and restored after a restart. Choose **Use full frame** to
+clear it. Use `--web-host` and `--web-port` to change the default `0.0.0.0:8080` listener;
+the page has no authentication, so expose it only on a trusted network.
 
 ### Tapo RTSP camera
 
@@ -79,8 +85,8 @@ export BIRDSPOTTER_RTSP_URL='rtsp://CAMERA_USERNAME:CAMERA_PASSWORD@CAMERA_IP:55
 uv run python scripts/deploy.py
 ```
 
-`stream1` is the high-quality stream. BirdSpotter preserves its 1600×896 frames without
-an additional detector resize. Use `/stream2` only if
+`stream1` is the high-quality stream. BirdSpotter preserves the original 1600×896
+frames for segmentation and gallery output while letterboxing detector input to 640×640. Use `/stream2` only if
 the Beelink cannot keep up with `/stream1`.
 
 Use `--log-level DEBUG` for per-frame detector timing and selection logs.

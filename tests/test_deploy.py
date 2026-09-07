@@ -35,6 +35,12 @@ def test_rtsp_url_selects_a_network_camera() -> None:
     assert args.web_port == 8080
 
 
+def test_roi_accepts_four_pixel_coordinates() -> None:
+    args = parse_arguments(["--roi", "320", "180", "1600", "900"])
+
+    assert args.roi == [320, 180, 1600, 900]
+
+
 def test_rtsp_source_name_redacts_camera_credentials() -> None:
     camera = Capture("rtsp://birdspotter:password@192.168.1.42:554/stream1")
 

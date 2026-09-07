@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-DETECTOR_DIRNAME = "yolo26-bird-896x1600-openvino-int8"
+DETECTOR_DIRNAME = "yolo26-bird-640x640-openvino-int8"
 COCO_BIRD_CLASS_ID = 14
 DETECTOR_BIRD_CLASS_ID = 0
 DETECTOR_BIRD_CLASS_NAME = "bird"
