@@ -11,11 +11,11 @@ import os
 import shutil
 from pathlib import Path
 
-REPOSITORY_ID = "PBatch23888/birds-object-detection-1600x896"
-ARCHIVE_NAME = "yolo_birds_1600x896.tar.gz"
+REPOSITORY_ID = "PBatch23888/birds-object-detection"
+ARCHIVE_NAME = "yolo_birds_640x640.tar.gz"
 
 DATASET_CARD = """---
-pretty_name: Birds Object Detection 1600x896
+pretty_name: Birds Object Detection 640x640
 task_categories:
   - object-detection
 size_categories:
@@ -27,15 +27,16 @@ tags:
   - object-detection
 ---
 
-# Birds Object Detection 1600x896
+# Birds Object Detection 640x640
 
 A single-class bird object-detection dataset prepared for Ultralytics at a
-1600 x 896 camera resolution. The dataset uses a deterministic 90% training
-and 10% validation split.
+640 x 640 input resolution. Positive images use a deterministic approximately
+90% training and 10% validation split. Reviewed garden negatives are added
+to the training split.
 
 ## Contents
 
-- `data/yolo_birds_1600x896.tar.gz`: complete Ultralytics dataset archive.
+- `data/yolo_birds_640x640.tar.gz`: complete Ultralytics dataset archive.
 - `manifest.json`: archive size, SHA-256 checksum, and dataset metadata.
 
 After extraction, the archive contains `data.yaml` and matching image and YOLO
@@ -55,9 +56,9 @@ labels/val/
 from huggingface_hub import hf_hub_download
 
 archive = hf_hub_download(
-    repo_id="PBatch23888/birds-object-detection-1600x896",
+    repo_id="PBatch23888/birds-object-detection",
     repo_type="dataset",
-    filename="data/yolo_birds_1600x896.tar.gz",
+    filename="data/yolo_birds_640x640.tar.gz",
 )
 ```
 
@@ -70,6 +71,10 @@ The data builder combines bird annotations from Open Images, COCO 2017,
 Pascal VOC 2012, Birdsnap, and NABirds. Open Images group-of and depiction
 annotations are excluded. All retained annotations are mapped to the single
 class `bird`.
+
+Training also includes human-reviewed bird-free garden images from Open Images
+and Places365, represented by empty YOLO label files. Places365 source images
+are 256 x 256 pixels and are resized with padding.
 
 ## Licensing
 
@@ -122,7 +127,7 @@ def package_dataset(archive: Path, output_dir: Path, image_count: int) -> None:
         "format_version": 1,
         "format": "ultralytics-yolo",
         "class_names": ["bird"],
-        "image_size": [896, 1600],
+        "image_size": [640, 640],
         "split": {"train": 0.9, "validation": 0.1},
         "image_count": image_count,
         "archive": {
@@ -148,9 +153,9 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("dist/huggingface/birds-object-detection-1600x896"),
+        default=Path("dist/huggingface/birds-object-detection"),
     )
-    parser.add_argument("--image-count", type=int, default=80_769)
+    parser.add_argument("--image-count", type=int, default=81_583)
     args = parser.parse_args()
     package_dataset(args.archive.resolve(), args.output_dir.resolve(), args.image_count)
 

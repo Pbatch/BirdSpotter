@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble BirdSpotter model artifacts into a Hugging Face upload folder."""
+"""Package and optionally publish BirdSpotter's YOLO26-L 640x640 detector."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+
+DEFAULT_REPOSITORY = "PBatch23888/birdspotter-yolo26"
 
 MODEL_CARD = """---
 library_name: ultralytics
@@ -19,15 +21,15 @@ tags:
   - openvino
 ---
 
-# BirdSpotter YOLO26s bird detector
+# BirdSpotter YOLO26-L bird detector
 
-YOLO26s fine-tuned for single-class bird detection at a 1600 x 896 camera
-resolution.
+YOLO26-L fine-tuned for single-class bird detection at 640 x 640 input
+resolution. BirdSpotter resizes and pads camera images to this input size.
 
 ## Files
 
 - `best.pt`: best Ultralytics/PyTorch training checkpoint.
-- `openvino-int8/`: static batch-one INT8 OpenVINO IR for 896 x 1600 input.
+- `openvino-int8/`: static batch-one INT8 OpenVINO IR for 640 x 640 input.
 - `training/`: available training configuration, metrics, and plots.
 - `manifest.json`: SHA-256 checksums and sizes for the packaged artifacts.
 
@@ -39,7 +41,7 @@ resolution.
 from ultralytics import YOLO
 
 model = YOLO("best.pt")
-results = model.predict("image.jpg", imgsz=1600)
+results = model.predict("image.jpg", imgsz=640)
 ```
 
 ### OpenVINO
@@ -58,8 +60,9 @@ above with that filename if it differs.
 
 - Task: single-class object detection
 - Class: `bird`
-- Training image size: 1600 x 896
-- OpenVINO input shape: 1 x 3 x 896 x 1600
+- Architecture: YOLO26-L
+- Training image size: 640 x 640
+- OpenVINO input shape: 1 x 3 x 640 x 640
 - OpenVINO precision: INT8
 
 Review the source datasets and their respective licenses before redistributing
@@ -111,9 +114,9 @@ def build_manifest(output_dir: Path) -> dict[str, object]:
     ]
     return {
         "format_version": 1,
-        "model": "YOLO26s",
+        "model": "YOLO26l",
         "class_names": ["bird"],
-        "image_size": [896, 1600],
+        "image_size": [640, 640],
         "files": files,
     }
 
@@ -123,16 +126,18 @@ def package_model(
     openvino_dir: Path,
     output_dir: Path,
     training_dir: Path | None,
+    *,
+    repository: str = DEFAULT_REPOSITORY,
 ) -> None:
     """Copy and describe the model artifacts in a Hub-friendly layout."""
     validate_inputs(checkpoint, openvino_dir, output_dir)
+    if training_dir is not None and not training_dir.is_dir():
+        raise FileNotFoundError(f"Training output directory not found: {training_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(checkpoint, output_dir / "best.pt")
     shutil.copytree(openvino_dir, output_dir / "openvino-int8")
 
     if training_dir is not None:
-        if not training_dir.is_dir():
-            raise FileNotFoundError(f"Training output directory not found: {training_dir}")
         packaged_training_dir = output_dir / "training"
         for filename in TRAINING_FILES:
             source = training_dir / filename
@@ -144,7 +149,24 @@ def package_model(
     manifest = build_manifest(output_dir)
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Created Hugging Face model folder: {output_dir}")
-    print(f"Upload with: hf upload PBatch23888/birdspotter-yolo26s {output_dir} .")
+    print(
+        f"Upload with: hf upload {repository} {output_dir} . --repo-type model "
+        "--delete 'openvino-int8/*' --delete 'training/*'"
+    )
+
+
+def publish_model(output_dir: Path, repository: str) -> None:
+    """Publish the package and replace obsolete export and training artifacts."""
+    from huggingface_hub import HfApi  # noqa: PLC0415
+
+    commit = HfApi().upload_folder(
+        repo_id=repository,
+        repo_type="model",
+        folder_path=output_dir,
+        delete_patterns=["openvino-int8/*", "training/*"],
+        commit_message="Update YOLO26-L 640x640 bird detector",
+    )
+    print(f"Published model: {commit.commit_url}")
 
 
 def main() -> None:
@@ -153,10 +175,14 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--openvino-dir", required=True, type=Path)
     parser.add_argument("--training-dir", type=Path)
+    parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
+    parser.add_argument(
+        "--upload", action="store_true", help="Upload the completed package to Hugging Face"
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("dist/huggingface/birdspotter-yolo26s"),
+        default=Path("dist/huggingface/birdspotter-yolo26"),
     )
     args = parser.parse_args()
     package_model(
@@ -164,7 +190,10 @@ def main() -> None:
         args.openvino_dir.resolve(),
         args.output_dir.resolve(),
         args.training_dir.resolve() if args.training_dir is not None else None,
+        repository=args.repository,
     )
+    if args.upload:
+        publish_model(args.output_dir.resolve(), args.repository)
 
 
 if __name__ == "__main__":

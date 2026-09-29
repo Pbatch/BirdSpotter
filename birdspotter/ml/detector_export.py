@@ -16,7 +16,7 @@ from birdspotter.models import (
     DETECTOR_BIRD_CLASS_NAME,
 )
 
-DETECTOR_SOURCE_REPOSITORY = "PBatch23888/birdspotter-yolo26s-640x640"
+DETECTOR_SOURCE_REPOSITORY = "PBatch23888/birdspotter-yolo26"
 DETECTOR_SOURCE_FILENAME = "best.pt"
 DETECTOR_INPUT_SHAPE = (640, 640)
 
