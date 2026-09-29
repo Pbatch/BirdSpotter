@@ -260,8 +260,8 @@ def train(  # noqa: C901, PLR0913, PLR0915
 
 @app.local_entrypoint()
 def main(  # noqa: PLR0913
-    dataset_tar: str = "/datasets/yolo_birds_1600x896.tar.gz",
-    run_name: str = "yolo26s-bird-1600x896",
+    dataset_tar: str = "/datasets/yolo_birds_640x640.tar.gz",
+    run_name: str = "yolo26s-bird-640x640",
     *,
     base_model: str = "yolo26s.pt",
     epochs: int = 10,

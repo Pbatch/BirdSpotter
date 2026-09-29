@@ -10,6 +10,5 @@ __pycache__/
 weights/
 dist/
 trained-model/
-data/processed/
-data/archives/
+data/
 *.part
