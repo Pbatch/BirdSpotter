@@ -12,3 +12,4 @@ dist/
 trained-model/
 data/
 *.part
+/MEMORY.md
