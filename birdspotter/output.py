@@ -60,11 +60,11 @@ def make_gallery_frame(
     image_bgr: np.ndarray,
     crop_mask: np.ndarray,
     crop_origin: tuple[int, int],
-    detection_box: tuple[float, float, float, float],
+    bird_box: tuple[float, float, float, float],
     *,
     background_brightness: float = 0.3,
 ) -> np.ndarray:
-    """Dim pixels outside a crop-local mask and outline the detection."""
+    """Dim pixels outside a crop-local mask and outline the bird."""
 
     if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
         raise ValueError("Gallery image must be an HxWx3 BGR image")
@@ -89,7 +89,7 @@ def make_gallery_frame(
     output = np.rint(image_bgr.astype(np.float32) * background_brightness).astype(np.uint8)
     output[full_mask] = image_bgr[full_mask]
 
-    x1, y1, x2, y2 = detection_box
+    x1, y1, x2, y2 = bird_box
     top_left = (round(x1), round(y1))
     bottom_right = (round(x2), round(y2))
     thickness = max(2, round(min(frame_height, frame_width) / 400))
@@ -102,12 +102,12 @@ def write_gallery_frame(
     image_bgr: np.ndarray,
     crop_mask: np.ndarray,
     crop_origin: tuple[int, int],
-    detection_box: tuple[float, float, float, float],
+    bird_box: tuple[float, float, float, float],
 ) -> Path:
     """Atomically write a full-frame gallery visualization."""
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    visualization = make_gallery_frame(image_bgr, crop_mask, crop_origin, detection_box)
+    visualization = make_gallery_frame(image_bgr, crop_mask, crop_origin, bird_box)
     temporary_output = output_path.with_name(f".{output_path.name}.part.png")
     if not cv2.imwrite(str(temporary_output), visualization):
         raise OSError(f"Failed to write {temporary_output}")

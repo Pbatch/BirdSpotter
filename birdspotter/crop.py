@@ -13,7 +13,7 @@ def expanded_crop(
     *,
     margin_fraction: float = 0.15,
 ) -> tuple[np.ndarray, Box]:
-    """Crop around a detection and translate its box into crop coordinates."""
+    """Crop around a bird box and translate its box into crop coordinates."""
 
     height, width = image_bgr.shape[:2]
     x1, y1, x2, y2 = box
@@ -24,7 +24,7 @@ def expanded_crop(
     crop_x2 = min(width, int(np.ceil(x2 + margin_x)))
     crop_y2 = min(height, int(np.ceil(y2 + margin_y)))
     if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
-        raise ValueError("Detection produced an empty segmentation crop")
+        raise ValueError("Bird box produced an empty segmentation crop")
     local_box = (
         x1 - crop_x1,
         y1 - crop_y1,

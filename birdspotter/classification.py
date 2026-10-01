@@ -1,4 +1,4 @@
-"""INT8 OpenVINO bird detection using an end-to-end YOLO export."""
+"""OpenVINO MobileNetV4 frame classification for the SAM 3 gate."""
 
 from __future__ import annotations
 
@@ -9,11 +9,10 @@ import cv2
 import numpy as np
 import openvino as ov
 
-from birdspotter.models import COCO_BIRD_CLASS_ID, DETECTOR_BIRD_CLASS_ID
-from birdspotter.types import Detection
+from birdspotter.types import Classification
 
 
-class OpenVinoDetectorBackend:
+class OpenVinoClassifierBackend:
     def __init__(
         self,
         model_path: Path,
@@ -29,11 +28,9 @@ class OpenVinoDetectorBackend:
         cache_dir.mkdir(parents=True, exist_ok=True)
         core.set_property({"CACHE_DIR": str(cache_dir)})
         model = core.read_model(model_files[0])
-        if not any(operation.get_type_name() == "FakeQuantize" for operation in model.get_ops()):
-            raise ValueError("Detector must be an INT8-quantized OpenVINO model")
         model_input = model.input(0)
         if not model_input.partial_shape.is_static:
-            raise TypeError("Detector must have a fixed input shape")
+            raise TypeError("Classifier must have a fixed input shape")
         self.input_shape = tuple(model_input.shape)
         self.compiled_model = core.compile_model(
             model,
@@ -50,7 +47,7 @@ class OpenVinoDetectorBackend:
     def describe(self) -> dict[str, object]:
         return {
             "backend": "OpenVINO",
-            "precision": "INT8",
+            "precision": "FP16 weights / FP32 inference",
             "device": self.device,
             "performance_hint": self.performance_hint,
         }
@@ -79,25 +76,8 @@ def letterbox(
     return canvas, scale, (pad_x, pad_y)
 
 
-def restore_box(
-    box: np.ndarray,
-    scale: float,
-    padding: tuple[int, int],
-    image_shape: tuple[int, ...],
-) -> tuple[float, float, float, float]:
-    """Map an xyxy box from letterboxed input back to source coordinates."""
-
-    pad_x, pad_y = padding
-    height, width = image_shape[:2]
-    x1 = float(np.clip((box[0] - pad_x) / scale, 0, width - 1))
-    y1 = float(np.clip((box[1] - pad_y) / scale, 0, height - 1))
-    x2 = float(np.clip((box[2] - pad_x) / scale, 0, width))
-    y2 = float(np.clip((box[3] - pad_y) / scale, 0, height))
-    return x1, y1, x2, y2
-
-
-class BirdDetector:
-    """Detect birds using YOLO26's bird-only INT8 OpenVINO output."""
+class BirdClassifier:
+    """Classify whole frames with a binary MobileNetV4 OpenVINO model."""
 
     def __init__(
         self,
@@ -107,47 +87,48 @@ class BirdDetector:
     ) -> None:
         if not model_path.is_dir():
             raise FileNotFoundError(
-                f"Detector model not found: {model_path}. Run `python scripts/ml/export_models.py`."
+                f"Classifier model not found: {model_path}. "
+                "Install the OpenVINO export produced by Modal training."
             )
         if not 0 <= confidence <= 1:
-            raise ValueError("Detector confidence must be between 0 and 1")
+            raise ValueError("Classifier confidence must be between 0 and 1")
 
         self.model_path = model_path
         self.confidence = confidence
-        self.backend = OpenVinoDetectorBackend(model_path)
+        self.backend = OpenVinoClassifierBackend(model_path)
         model_height, model_width = self.backend.input_shape[-2:]
         if not isinstance(model_height, int) or not isinstance(model_width, int):
-            raise TypeError("Detector must have a fixed input shape")
+            raise TypeError("Classifier must have a fixed input shape")
         self.input_shape = (model_height, model_width)
 
-    def detect(self, image_bgr: np.ndarray) -> list[Detection]:
-        if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
-            raise TypeError("Detector input must be an HxWx3 BGR image")
+    def preprocess(self, image_bgr: np.ndarray) -> np.ndarray:
+        """Preserve the full frame and apply the training normalization."""
+        if image_bgr.ndim != 3 or image_bgr.shape[2] != 3 or not image_bgr.size:
+            raise TypeError("Classifier input must be a nonempty HxWx3 BGR image")
+        prepared, _, _ = letterbox(image_bgr, self.input_shape)
+        rgb = prepared[:, :, ::-1].astype(np.float32) / 255.0
+        rgb = (rgb - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array(
+            [0.229, 0.224, 0.225], dtype=np.float32
+        )
+        return np.ascontiguousarray(rgb.transpose(2, 0, 1)[None])
 
-        prepared, scale, padding = letterbox(image_bgr, self.input_shape)
-        tensor = prepared[:, :, ::-1].transpose(2, 0, 1)
-        tensor = np.ascontiguousarray(tensor[None], dtype=np.float32) / 255.0
-        output = self.backend.run(tensor)
-        rows = np.asarray(output).squeeze(0)
+    def predict(self, image_bgr: np.ndarray) -> float:
+        """Return the probability that the whole frame contains a bird."""
+        logits = np.asarray(self.backend.run(self.preprocess(image_bgr)))
+        if logits.shape != (1, 1) or not np.isfinite(logits).all():
+            raise RuntimeError(f"Expected one finite bird logit of shape (1, 1), got {logits}")
+        logit = float(logits[0, 0])
+        if logit >= 0:
+            return float(1 / (1 + np.exp(-logit)))
+        exponential = np.exp(logit)
+        return float(exponential / (1 + exponential))
 
-        if rows.ndim != 2 or rows.shape[1] < 6:
-            raise RuntimeError(
-                f"Unexpected detector output shape {np.asarray(output).shape}; "
-                "prepare the detector with `python scripts/ml/export_models.py`"
-            )
-
-        detections: list[Detection] = []
-        for row in rows:
-            confidence = float(row[4])
-            class_id = round(float(row[5]))
-            if confidence < self.confidence or class_id != DETECTOR_BIRD_CLASS_ID:
-                continue
-            box = restore_box(row[:4], scale, padding, image_bgr.shape)
-            if box[2] <= box[0] or box[3] <= box[1]:
-                continue
-            detections.append(Detection(box=box, confidence=confidence))
-
-        return sorted(detections, key=lambda detection: detection.confidence, reverse=True)
+    def classify(self, image_bgr: np.ndarray) -> Classification | None:
+        """Return a positive frame classification when bird probability meets the threshold."""
+        confidence = self.predict(image_bgr)
+        if confidence < self.confidence:
+            return None
+        return Classification(confidence=confidence)
 
     def describe(self) -> dict[str, Any]:
         """Return runtime information suitable for metadata and diagnostics."""
@@ -156,7 +137,9 @@ class BirdDetector:
             "model": self.model_path.name,
             "input_shape": self.input_shape,
             "confidence_threshold": self.confidence,
-            "bird_class_id": COCO_BIRD_CLASS_ID,
-            "model_output_class_id": DETECTOR_BIRD_CLASS_ID,
+            "task": "image-classification",
+            "classes": ["bird"],
+            "output_activation": "sigmoid",
+            "model_output_class_id": 0,
             **self.backend.describe(),
         }

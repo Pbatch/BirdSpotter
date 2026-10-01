@@ -1,163 +1,119 @@
-#!/usr/bin/env python3
-"""Assemble the BirdSpotter YOLO dataset into a Hugging Face upload folder."""
-
-from __future__ import annotations
+"""Package a classification ImageFolder dataset and optionally upload to Hugging Face."""
 
 import argparse
-import errno
-import hashlib
-import json
-import os
 import shutil
+import tarfile
+from collections import Counter
 from pathlib import Path
 
-REPOSITORY_ID = "PBatch23888/birds-object-detection"
-ARCHIVE_NAME = "yolo_birds_640x640.tar.gz"
+from PIL import Image
 
-DATASET_CARD = """---
-pretty_name: Birds Object Detection 640x640
+from birdspotter.ml.hf_packaging import (
+    add_upload_arguments,
+    prepare_output,
+    upload_package,
+    write_manifest,
+)
+
+REPOSITORY = "PBatch23888/birds-classification"
+ARCHIVE_NAME = "classifier_birds.tar.gz"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".ppm", ".pgm"}
+
+
+def package_dataset(dataset: Path, output: Path) -> None:  # noqa: C901
+    counts: dict[str, dict[str, int]] = {}
+    sizes: Counter[tuple[int, int]] = Counter()
+    images = []
+    for split in ("train", "val", "test"):
+        directory = dataset / split
+        if split == "test" and not directory.exists():
+            continue
+        if not directory.is_dir():
+            raise FileNotFoundError(directory)
+        classes = {path.name for path in directory.iterdir() if path.is_dir()}
+        if classes != {"bird", "no_bird"}:
+            raise ValueError(f"Expected bird/ and no_bird/ directories in {directory}")
+        counts[split] = {}
+        for label in sorted(classes):
+            paths = sorted(
+                path
+                for path in (directory / label).rglob("*")
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if not paths:
+                raise ValueError(f"No images in {directory / label}")
+            counts[split][label] = len(paths)
+            for path in paths:
+                with Image.open(path) as image:
+                    sizes[image.size] += 1
+            images.extend(paths)
+    prepare_output(output, dataset)
+    archive = output / "data" / ARCHIVE_NAME
+    archive.parent.mkdir()
+    with tarfile.open(archive, "w:gz") as bundle:
+        for image in images:
+            bundle.add(image, arcname=image.relative_to(dataset).as_posix(), recursive=False)
+        for name in ("manifest.jsonl", "build-config.json"):
+            source = dataset / name
+            if source.is_file():
+                bundle.add(source, arcname=name)
+                shutil.copy2(source, output / name)
+    (output / "README.md").write_text("""---
+pretty_name: BirdSpotter Bird Classification
 task_categories:
-  - object-detection
-size_categories:
-  - 10K<n<100K
+  - image-classification
 tags:
   - birds
-  - yolo
-  - ultralytics
-  - object-detection
+  - imagefolder
 ---
 
-# Birds Object Detection 640x640
+# BirdSpotter classification dataset
 
-A single-class bird object-detection dataset prepared for Ultralytics at a
-640 x 640 input resolution. Positive images use a deterministic approximately
-90% training and 10% validation split. Reviewed garden negatives are added
-to the training split.
+Whole-frame bird/no-bird classification. Training targets are bird=1 and
+no_bird=0 (ImageFolder's alphabetical indices must be remapped).
 
-## Contents
+`data/classifier_birds.tar.gz` contains train/ and val/ ImageFolder trees,
+with bird/ and no_bird/ subdirectories, plus test/ when present. The archive
+can be uploaded directly to the BirdSpotter Modal training volume.
+`manifest.json` contains actual split/class counts, image dimensions and checksums.
+Source build configuration and provenance manifest are included when available.
+Caches and source downloads are excluded.
 
-- `data/yolo_birds_640x640.tar.gz`: complete Ultralytics dataset archive.
-- `manifest.json`: archive size, SHA-256 checksum, and dataset metadata.
+Download with `hf download OWNER/REPOSITORY data/classifier_birds.tar.gz
+--repo-type dataset --local-dir ./downloaded` (on one line), then extract with
+`tar -xzf downloaded/data/classifier_birds.tar.gz -C DESTINATION`.
 
-After extraction, the archive contains `data.yaml` and matching image and YOLO
-label trees:
-
-```text
-data.yaml
-images/train/
-images/val/
-labels/train/
-labels/val/
-```
-
-## Download
-
-```python
-from huggingface_hub import hf_hub_download
-
-archive = hf_hub_download(
-    repo_id="PBatch23888/birds-object-detection",
-    repo_type="dataset",
-    filename="data/yolo_birds_640x640.tar.gz",
-)
-```
-
-Private repositories require an authenticated Hugging Face account with
-access to the dataset.
-
-## Dataset composition
-
-The data builder combines bird annotations from Open Images, COCO 2017,
-Pascal VOC 2012, Birdsnap, and NABirds. Open Images group-of and depiction
-annotations are excluded. All retained annotations are mapped to the single
-class `bird`.
-
-Training also includes human-reviewed bird-free garden images from Open Images
-and Places365, represented by empty YOLO label files. Places365 source images
-are 256 x 256 pixels and are resized with padding.
-
-## Licensing
-
-This is a compilation of multiple upstream datasets. Their respective terms
-and licenses continue to apply. Review each upstream dataset's license before
-redistributing or using this compilation.
-"""
-
-
-def sha256(path: Path) -> str:
-    """Calculate a file's SHA-256 digest."""
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def place_archive(source: Path, destination: Path) -> str:
-    """Hard-link the archive when possible, falling back to a file copy."""
-    try:
-        os.link(source, destination)
-    except OSError as error:
-        if error.errno != errno.EXDEV:
-            raise
-        shutil.copy2(source, destination)
-        return "copy"
-    return "hard-link"
-
-
-def package_dataset(archive: Path, output_dir: Path, image_count: int) -> None:
-    """Create a Hub-friendly folder containing the compressed YOLO dataset."""
-    if not archive.is_file():
-        raise FileNotFoundError(f"Dataset archive not found: {archive}")
-    if not archive.name.endswith((".tar.gz", ".tgz")):
-        raise ValueError(f"Expected a .tar.gz or .tgz archive: {archive}")
-    if image_count < 1:
-        raise ValueError("Image count must be positive")
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"Output directory is not empty: {output_dir}")
-
-    data_dir = output_dir / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    packaged_archive = data_dir / ARCHIVE_NAME
-    placement = place_archive(archive, packaged_archive)
-    checksum = sha256(packaged_archive)
-
-    (output_dir / "README.md").write_text(DATASET_CARD)
-    manifest = {
-        "format_version": 1,
-        "format": "ultralytics-yolo",
-        "class_names": ["bird"],
-        "image_size": [640, 640],
-        "split": {"train": 0.9, "validation": 0.1},
-        "image_count": image_count,
-        "archive": {
-            "path": f"data/{ARCHIVE_NAME}",
-            "size": packaged_archive.stat().st_size,
-            "sha256": checksum,
-        },
+This is a compilation of upstream images. Their respective licences and terms
+continue to apply; consult the source provenance before redistribution.
+""")
+    metadata = {
+        "format": "imagefolder",
+        "targets": {"no_bird": 0, "bird": 1},
+        "image_count": len(images),
+        "counts": counts,
+        "image_sizes": [
+            {"width": width, "height": height, "count": count}
+            for (width, height), count in sorted(sizes.items())
+        ],
     }
-    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"Created Hugging Face dataset folder: {output_dir}")
-    print(f"Archive placement: {placement}")
-    print(f"Upload with: hf upload {REPOSITORY_ID} {output_dir} . --repo-type dataset")
+    write_manifest(output, metadata)
+    print(f"Packaged classification dataset: {output}")
 
 
 def main() -> None:
-    """Parse command-line arguments and create the dataset package."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-dir", type=Path, default=Path("data/processed/classifier_birds"))
     parser.add_argument(
-        "--archive",
-        type=Path,
-        default=Path("data/archives") / ARCHIVE_NAME,
+        "--output-dir", type=Path, default=Path("dist/huggingface/birds-classification")
     )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("dist/huggingface/birds-object-detection"),
-    )
-    parser.add_argument("--image-count", type=int, default=81_583)
+    add_upload_arguments(parser, REPOSITORY)
     args = parser.parse_args()
-    package_dataset(args.archive.resolve(), args.output_dir.resolve(), args.image_count)
+    if not args.upload_only:
+        package_dataset(args.dataset_dir.resolve(), args.output_dir.resolve())
+    if args.upload or args.upload_only:
+        upload_package(
+            args.output_dir.resolve(), args.repo_id, repo_type="dataset", private=args.private
+        )
 
 
 if __name__ == "__main__":

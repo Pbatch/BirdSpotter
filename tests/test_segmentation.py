@@ -4,7 +4,7 @@ import pytest
 from birdspotter.segmentation import component_for_box, validate_mask
 
 
-def test_component_overlapping_detector_box_is_retained() -> None:
+def test_component_overlapping_bird_box_is_retained() -> None:
     mask = np.zeros((100, 120), dtype=bool)
     mask[5:45, 5:45] = True
     mask[60:80, 70:95] = True

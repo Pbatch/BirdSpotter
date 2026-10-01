@@ -1,1 +1,1 @@
-"""Bird detection and segmentation pipeline."""
+"""Bird classification and segmentation pipeline."""

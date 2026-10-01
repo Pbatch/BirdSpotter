@@ -13,13 +13,12 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from birdspotter.models import default_weights_dir, detector_path, sam21_openvino_dir
+from birdspotter.models import classifier_path, default_weights_dir, sam3_openvino_dir
 
-DEFAULT_DETECTOR_REPOSITORY = "PBatch23888/birdspotter-yolo26"
-DEFAULT_SAM21_REPOSITORY = "PBatch23888/birdspotter-sam21-openvino"
+DEFAULT_CLASSIFIER_REPOSITORY = "PBatch23888/birdspotter-mobilenetv4"
 DEFAULT_REVISION = "main"
-DETECTOR_MODEL_PREFIX = "openvino-int8/"
-SAM21_MODEL_PREFIX = "openvino-512/"
+CLASSIFIER_MODEL_PREFIX = "openvino/"
+SAM3_MODEL_PREFIX = "openvino-504/"
 USER_AGENT = "BirdSpotter/0.1"
 
 
@@ -170,35 +169,48 @@ def main() -> None:
     """Parse command-line arguments and install the deployment models."""
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--detector-repository", default=DEFAULT_DETECTOR_REPOSITORY)
-    parser.add_argument("--sam21-repository", default=DEFAULT_SAM21_REPOSITORY)
+    parser.add_argument("--classifier-repository", help="Published MobileNetV4 repository")
+    parser.add_argument("--sam3-repository", help="Repository containing the custom SAM 3 export")
     parser.add_argument("--revision", default=DEFAULT_REVISION)
     parser.add_argument(
-        "--detector-destination",
+        "--classifier-destination",
         type=Path,
-        default=detector_path(default_weights_dir()),
+        default=classifier_path(default_weights_dir()),
     )
     parser.add_argument(
-        "--sam21-destination",
+        "--sam3-destination",
         type=Path,
-        default=sam21_openvino_dir(default_weights_dir()),
+        default=sam3_openvino_dir(default_weights_dir()),
     )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    install_model(
-        args.detector_repository,
-        args.revision,
-        args.detector_destination.resolve(),
-        DETECTOR_MODEL_PREFIX,
-        force=args.force,
-    )
-    install_model(
-        args.sam21_repository,
-        args.revision,
-        args.sam21_destination.resolve(),
-        SAM21_MODEL_PREFIX,
-        force=args.force,
-    )
+    if args.classifier_repository:
+        install_model(
+            args.classifier_repository,
+            args.revision,
+            args.classifier_destination.resolve(),
+            CLASSIFIER_MODEL_PREFIX,
+            force=args.force,
+        )
+    elif not list(args.classifier_destination.glob("*.xml")):
+        raise FileNotFoundError("Train/export MobileNetV4 first or pass --classifier-repository")
+    if args.sam3_repository:
+        install_model(
+            args.sam3_repository,
+            args.revision,
+            args.sam3_destination.resolve(),
+            SAM3_MODEL_PREFIX,
+            force=args.force,
+        )
+    else:
+        required = ("sam3_bird.xml", "sam3_bird.bin")
+        missing = [name for name in required if not (args.sam3_destination / name).is_file()]
+        if missing:
+            parser.error(
+                "SAM 3 requires a local export or --sam3-repository. "
+                "Run `python -m birdspotter.ml.sam3_export` first."
+            )
+        print(f"Using local SAM 3 export: {args.sam3_destination}")
 
 
 if __name__ == "__main__":

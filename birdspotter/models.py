@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-DETECTOR_DIRNAME = "yolo26-bird-640x640-openvino-int8"
-COCO_BIRD_CLASS_ID = 14
-DETECTOR_BIRD_CLASS_ID = 0
-DETECTOR_BIRD_CLASS_NAME = "bird"
-SAM21_DIRNAME = "sam21"
-SAM21_OPENVINO_DIRNAME = "openvino-512"
+CLASSIFIER_DIRNAME = "mobilenetv4-bird-640-openvino"
+SAM3_DIRNAME = "sam3"
+SAM3_OPENVINO_DIRNAME = "openvino-504"
 
 
 def project_root() -> Path:
@@ -20,9 +17,9 @@ def default_weights_dir() -> Path:
     return project_root() / "weights"
 
 
-def detector_path(weights_dir: Path) -> Path:
-    return weights_dir / "detector" / DETECTOR_DIRNAME
+def classifier_path(weights_dir: Path) -> Path:
+    return weights_dir / "classifier" / CLASSIFIER_DIRNAME
 
 
-def sam21_openvino_dir(weights_dir: Path) -> Path:
-    return weights_dir / SAM21_DIRNAME / SAM21_OPENVINO_DIRNAME
+def sam3_openvino_dir(weights_dir: Path) -> Path:
+    return weights_dir / SAM3_DIRNAME / SAM3_OPENVINO_DIRNAME

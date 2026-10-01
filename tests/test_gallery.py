@@ -46,7 +46,7 @@ def test_recent_birds_returns_only_the_ten_newest_outputs(tmp_path: Path) -> Non
 def test_templates_show_metadata_default_tab_and_empty_state(tmp_path: Path) -> None:
     empty_page = render_gallery(tmp_path)
 
-    assert b"Waiting for the first bird detection" in empty_page
+    assert b"Waiting for the first bird sighting" in empty_page
     assert b'<link rel="icon" type="image/png" href="/icon.png">' in empty_page
     assert b'<link rel="stylesheet" href="/static/gallery.css">' in empty_page
     assert b'<script src="/static/gallery.js?v=live-roi-1" defer></script>' in empty_page

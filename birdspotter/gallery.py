@@ -242,7 +242,7 @@ async def update_roi(request: Request) -> Response:
         raise HTTPException(400, str(error)) from error
     camera.set_roi(roi)
     write_roi_config(config_path, roi)
-    logger.info("Detection ROI updated | roi={}", roi if roi is not None else "full frame")
+    logger.info("Classification ROI updated | roi={}", roi if roi is not None else "full frame")
     return JSONResponse({"roi": roi})
 
 
