@@ -1,4 +1,4 @@
-"""Shared mask validation helpers for the SAM 2.1 OpenVINO pipeline."""
+"""Shared mask validation helpers for segmentation pipelines."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from birdspotter.types import Box
 
 
 def component_for_box(mask: np.ndarray, box: Box) -> np.ndarray:
-    """Keep the connected mask component that overlaps the detector box most."""
+    """Keep the connected mask component that overlaps the bird box most."""
 
     binary = np.asarray(mask, dtype=np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
@@ -49,4 +49,4 @@ def validate_mask(mask: np.ndarray, box: Box, *, minimum_pixels: int = 64) -> No
     x2 = int(np.clip(np.ceil(box[2]), 0, width))
     y2 = int(np.clip(np.ceil(box[3]), 0, height))
     if x2 <= x1 or y2 <= y1 or not np.any(mask[y1:y2, x1:x2]):
-        raise ValueError("Segmentation mask does not overlap the detector box")
+        raise ValueError("Segmentation mask does not overlap the bird box")

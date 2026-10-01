@@ -11,10 +11,9 @@ Box = tuple[float, float, float, float]
 
 
 @dataclass(frozen=True, slots=True)
-class Detection:
-    """A bird detection in source-image coordinates."""
+class Classification:
+    """A positive whole-frame bird classification."""
 
-    box: Box
     confidence: float
 
 
@@ -22,8 +21,8 @@ class Detection:
 class BirdCandidate:
     """The best bird seen so far in one selection window."""
 
-    detection: Detection
+    classification: Classification
     frame_bgr: np.ndarray
     frame_sequence: int
     captured_at: datetime
-    detector_seconds: float = 0.0
+    classifier_seconds: float = 0.0

@@ -57,7 +57,7 @@ def test_crop_to_roi_rejects_invalid_coordinates() -> None:
         crop_to_roi(image, (5, 2, 5, 8))
 
 
-def test_set_roi_updates_the_detector_frame() -> None:
+def test_set_roi_updates_the_classifier_frame() -> None:
     camera = Capture()
     image = np.zeros((10, 12, 3), dtype=np.uint8)
     camera._latest_source = CapturedFrame(3, datetime.now(UTC), image)  # noqa: SLF001

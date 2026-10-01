@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare end-to-end latency and predictions for OpenVINO detector variants."""
+"""Compare end-to-end latency and predictions for OpenVINO classifier variants."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from time import perf_counter
 import cv2
 import numpy as np
 
-from birdspotter.detection import BirdDetector
+from birdspotter.classification import BirdClassifier
 
 
 def load_images(paths: list[Path]) -> list[tuple[Path, np.ndarray]]:
@@ -34,34 +34,30 @@ def benchmark_model(
     warmup: int,
     runs: int,
 ) -> None:
-    """Print prediction summaries and warmed end-to-end detector timings."""
+    """Print prediction summaries and warmed end-to-end classifier timings."""
 
-    detector = BirdDetector(model_path)
+    classifier = BirdClassifier(model_path)
     for path, image in images:
-        detections = detector.detect(image)
-        summary = "none"
-        if detections:
-            top = detections[0]
-            summary = (
-                f"count={len(detections)} confidence={top.confidence:.3f} "
-                f"box={tuple(round(value, 1) for value in top.box)}"
-            )
+        classification = classifier.classify(image)
+        summary = "no bird"
+        if classification is not None:
+            summary = f"bird confidence={classification.confidence:.3f}"
         print(f"prediction model={model_path.name} image={path.name} {summary}")
 
     for index in range(warmup):
-        detector.detect(images[index % len(images)][1])
+        classifier.classify(images[index % len(images)][1])
 
     durations_ms = []
     for index in range(runs):
         image = images[index % len(images)][1]
         started = perf_counter()
-        detector.detect(image)
+        classifier.classify(image)
         durations_ms.append((perf_counter() - started) * 1000)
 
     ordered = sorted(durations_ms)
     percentile_95 = ordered[math.ceil(len(ordered) * 0.95) - 1]
     average = mean(durations_ms)
-    height, width = detector.input_shape
+    height, width = classifier.input_shape
     print(
         f"benchmark model={model_path.name} input={height}x{width} "
         f"mean={average:.1f}ms median={median(durations_ms):.1f}ms "

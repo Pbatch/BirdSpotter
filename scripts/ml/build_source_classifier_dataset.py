@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Resumable full-corpus builder for a one-class Ultralytics bird dataset."""
+"""Resumable source-corpus builder for full-frame bird classification."""
+
+# Source libraries load lazily to keep local builds and tests lightweight.
+# ruff: noqa: PLC0415
 
 import argparse
 import csv
@@ -7,23 +10,20 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import tarfile
 import threading
 import time
 import zipfile
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
-import fiftyone as fo
-import fiftyone.zoo as foz
 import requests
-from datasets import Image as HFImage
-from datasets import load_dataset
-from huggingface_hub import snapshot_download
 from PIL import Image, ImageFile
+from tqdm import tqdm
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True  # ty: ignore[invalid-assignment]
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,12 +41,13 @@ class BuildConfig:
     output_dir: Path
     source_cache: Path
     size: tuple[int, int]
+    coco_negative_ratio: int = 3
 
 
 CONFIG = BuildConfig(
-    output_dir=ROOT / "data" / "processed" / "yolo_birds_1600x896",
-    source_cache=ROOT / "data" / "processed" / "yolo_birds_1600x896" / ".metadata",
-    size=(1600, 896),
+    output_dir=ROOT / "data" / "processed" / "classifier_birds",
+    source_cache=ROOT / "data" / "processed" / "classifier_birds" / ".metadata",
+    size=(640, 640),
 )
 
 
@@ -60,9 +61,23 @@ def fetch(url: str, path: Path) -> Path:
         if r.status_code == 200 and part.exists():
             part.unlink()
         r.raise_for_status()
-        with part.open("ab" if r.status_code == 206 else "wb") as f:
+        initial = part.stat().st_size if part.exists() and r.status_code == 206 else 0
+        content_length = r.headers.get("Content-Length")
+        total = initial + int(content_length) if content_length else None
+        with (
+            part.open("ab" if r.status_code == 206 else "wb") as f,
+            tqdm(
+                total=total,
+                initial=initial,
+                desc=f"Download {path.name}",
+                unit="B",
+                unit_scale=True,
+                mininterval=1,
+            ) as progress,
+        ):
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
+                progress.update(len(chunk))
     part.replace(path)
     return path
 
@@ -105,34 +120,15 @@ def save(  # noqa: PLR0913
     sp = split(source, key)
     digest = hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest()[:16]
     stem = f"{source}_{digest}"
-    ip = CONFIG.output_dir / "images" / sp / f"{stem}.jpg"
-    lp = CONFIG.output_dir / "labels" / sp / f"{stem}.txt"
-    if not (ip.exists() and lp.exists()):
-        im, boxes = letterbox(im, boxes)
-        if not boxes:
-            return 0
-        ti = ip.with_suffix(".part")
-        tl = lp.with_suffix(".part")
-        im.save(ti, "JPEG", quality=92)
-        width, height = CONFIG.size
-        tl.write_text(
-            "\n".join(
-                " ".join(
-                    (
-                        "0",
-                        f"{(a + c) / (2 * width):.8f}",
-                        f"{(b + d) / (2 * height):.8f}",
-                        f"{(c - a) / width:.8f}",
-                        f"{(d - b) / height:.8f}",
-                    )
-                )
-                for a, b, c, d in boxes
-            )
-            + "\n"
-        )
-        ti.replace(ip)
-        tl.replace(lp)
-    count = len(lp.read_text().splitlines())
+    label = "bird" if boxes else "no_bird"
+    ip = CONFIG.output_dir / sp / label / f"{stem}.jpg"
+    ip.parent.mkdir(parents=True, exist_ok=True)
+    if not ip.exists():
+        prepared, _ = letterbox(im, [])
+        temporary = ip.with_suffix(".part")
+        prepared.save(temporary, "JPEG", quality=92)
+        temporary.replace(ip)
+    count = len(boxes)
     identity = (source, key)
     with LOCK:
         if identity not in SEEN:
@@ -145,6 +141,8 @@ def save(  # noqa: PLR0913
                         "source_id": key,
                         "original": original,
                         "objects": count,
+                        "label": label,
+                        "target": int(bool(boxes)),
                     }
                 )
                 + "\n"
@@ -161,6 +159,9 @@ def raw(row: dict[str, Any]) -> Image.Image:
 
 
 def openimages(m: TextIO, limit: int | None) -> None:
+    import fiftyone as fo
+    import fiftyone.zoo as foz
+
     # FiftyOne provides the optimized, resized (max dimension 1024) Open Images
     # zoo download path. We still pre-read annotations so images with any
     # group/depiction Bird box are excluded before their pixels are downloaded.
@@ -177,7 +178,9 @@ def openimages(m: TextIO, limit: int | None) -> None:
         good = defaultdict(list)
         bad = set()
         with fetch(url, CONFIG.source_cache / f"openimages-{rs}.csv").open(newline="") as f:
-            for r in csv.DictReader(f):
+            for r in tqdm(
+                csv.DictReader(f), desc=f"Open Images/{rs} annotations", unit="rows", mininterval=1
+            ):
                 if r["LabelName"] != "/m/015p6":
                     continue
                 k = r["ImageID"]
@@ -210,10 +213,83 @@ def openimages(m: TextIO, limit: int | None) -> None:
                 return save("openimages", k, im, boxes, m, original=rs)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            for added in pool.map(process, paths):
-                n += added
+            futures = [pool.submit(process, path) for path in paths]
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"Open Images/{rs}",
+                unit="images",
+                mininterval=1,
+            ):
+                n += future.result()
         if limit and n >= limit:
             return
+
+
+def select_coco_images(
+    images: dict[int, dict[str, Any]],
+    bird_ids: set[int],
+    ratio: int,
+) -> tuple[list[int], list[int]]:
+    """Choose a stable negative sample before applying resume filtering."""
+    positive = sorted(bird_ids & images.keys())
+    negative = [key for key in sorted(images) if key not in bird_ids]
+    return positive, negative[: len(positive) * ratio]
+
+
+def prune_coco_negatives(archive: Path, manifest: Path) -> int:
+    """Preserve excess negatives outside ImageFolder and remove their active records."""
+    if not archive.is_file() or not manifest.is_file():
+        return 0
+    allowed = set()
+    with zipfile.ZipFile(archive) as bundle:
+        for source_split in ("train2017", "val2017"):
+            data = json.loads(bundle.read(f"annotations/instances_{source_split}.json"))
+            bird = next(row["id"] for row in data["categories"] if row["name"] == "bird")
+            bird_ids = {
+                row["image_id"] for row in data["annotations"] if row["category_id"] == bird
+            }
+            images = {row["id"]: row for row in data["images"]}
+            _, negatives = select_coco_images(images, bird_ids, CONFIG.coco_negative_ratio)
+            allowed.update(str(key) for key in negatives)
+    records = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()]
+    removed = [
+        row
+        for row in records
+        if row["source"] == "coco2017"
+        and row.get("label") == "no_bird"
+        and str(row["source_id"]) not in allowed
+    ]
+    if not removed:
+        return 0
+    excluded = CONFIG.output_dir / ".excluded" / "coco2017"
+    excluded.mkdir(parents=True, exist_ok=True)
+    backup = excluded / "manifest-before-cap.jsonl"
+    if not backup.exists():
+        shutil.copy2(manifest, backup)
+    for row in removed:
+        relative = Path(row["image"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Unsafe image path in manifest: {relative}")
+        image = CONFIG.output_dir / relative
+        if image.is_file():
+            destination = excluded / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            image.replace(destination)
+    kept = [
+        row
+        for row in records
+        if not (
+            row["source"] == "coco2017"
+            and row.get("label") == "no_bird"
+            and str(row["source_id"]) not in allowed
+        )
+    ]
+    temporary = manifest.with_suffix(".part")
+    temporary.write_text("".join(json.dumps(row) + "\n" for row in kept))
+    temporary.replace(manifest)
+    print(f"[coco2017] Preserved {len(removed)} excess negatives in {excluded}", flush=True)
+    return len(removed)
 
 
 def coco(m: TextIO, limit: int | None) -> None:  # noqa: C901
@@ -228,11 +304,22 @@ def coco(m: TextIO, limit: int | None) -> None:  # noqa: C901
             bird = next(x["id"] for x in d["categories"] if x["name"] == "bird")
             boxes = defaultdict(list)
             for a in d["annotations"]:
-                if a["category_id"] == bird and not a.get("iscrowd", 0):
+                if a["category_id"] == bird:
                     x, y, w, h = a["bbox"]
                     boxes[a["image_id"]].append((x, y, x + w, y + h))
             ims = {x["id"]: x for x in d["images"]}
-            keys = [k for k in sorted(boxes) if ("coco2017", str(k)) not in SEEN]
+            # Alternate positives and annotated negatives so a limited run includes both.
+            positive, negative = select_coco_images(ims, set(boxes), CONFIG.coco_negative_ratio)
+            print(
+                f"[coco2017/{rs}] selected {len(positive)} birds and {len(negative)} negatives "
+                f"(maximum {CONFIG.coco_negative_ratio}:1)",
+                flush=True,
+            )
+            keys = []
+            for index in range(max(len(positive), len(negative))):
+                for group in (positive, negative):
+                    if index < len(group) and ("coco2017", str(group[index])) not in SEEN:
+                        keys.append(group[index])  # noqa: PERF401
             if limit:
                 keys = keys[: max(0, limit - n)]
 
@@ -260,25 +347,37 @@ def coco(m: TextIO, limit: int | None) -> None:  # noqa: C901
                     "coco2017",
                     str(k),
                     Image.open(io.BytesIO(r.content)),
-                    boxes[k],
+                    boxes.get(k, []),
                     m,
                     original=rs,
                 )
 
             with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-                for added in pool.map(process, keys):
-                    n += added
+                futures = [pool.submit(process, key) for key in keys]
+                for future in tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc=f"COCO/{rs}",
+                    unit="images",
+                    mininterval=1,
+                ):
+                    n += future.result()
             if limit and n >= limit:
                 return
 
 
 def voc(m: TextIO, limit: int | None) -> None:
+    from datasets import Image as HFImage
+    from datasets import load_dataset
+
     n = 0
     for rs in ("train", "validation"):
         ds = load_dataset(
             "TNILab/pascal_voc2012_det_train_val", split=rs, streaming=True
         ).cast_column("image", HFImage(decode=False))
-        for row in ds:
+        for index, row in enumerate(
+            tqdm(ds, desc=f"VOC/{rs} scanned", unit="images", mininterval=1)
+        ):
             boxes = [
                 (x, y, x + w, y + h)
                 for (x, y, w, h), c in zip(
@@ -286,14 +385,17 @@ def voc(m: TextIO, limit: int | None) -> None:
                 )
                 if c == 2
             ]
-            if boxes:
-                k = str(row.get("image_id", f"{rs}-{n}"))
-                n += save("voc2012", k, raw(row), boxes, m, original=rs)
-                if limit and n >= limit:
-                    return
+            k = str(row.get("image_id", f"{rs}-{index}"))
+            if ("voc2012", k) in SEEN:
+                continue
+            n += save("voc2012", k, raw(row), boxes, m, original=rs)
+            if limit and n >= limit:
+                return
 
 
 def birdsnap(m: TextIO, limit: int | None) -> None:  # noqa: C901
+    from huggingface_hub import snapshot_download
+
     os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
     os.environ["HF_HOME"] = str(CONFIG.source_cache / "huggingface-cache")
     os.environ["HF_XET_CACHE"] = str(CONFIG.source_cache / "huggingface-cache" / "xet")
@@ -366,12 +468,25 @@ def birdsnap(m: TextIO, limit: int | None) -> None:  # noqa: C901
         return added
 
     n = 0
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        for added in pool.map(process_species, grouped.items()):
-            n += added
+    with (
+        ThreadPoolExecutor(max_workers=4) as pool,
+        tqdm(
+            total=len(selected),
+            desc="Birdsnap",
+            unit="images",
+            mininterval=1,
+        ) as progress,
+    ):
+        futures = {pool.submit(process_species, item): len(item[1]) for item in grouped.items()}
+        for future in as_completed(futures):
+            n += future.result()
+            progress.update(futures[future])
 
 
 def nabirds(m: TextIO, limit: int | None) -> None:
+    from datasets import Image as HFImage
+    from datasets import load_dataset
+
     p = fetch(
         "https://raw.githubusercontent.com/Rice-Field/NABirds/master/bounding_boxes.txt",
         CONFIG.source_cache / "nabirds-boxes.txt",
@@ -384,7 +499,7 @@ def nabirds(m: TextIO, limit: int | None) -> None:
         "anjunhu/naively_captioned_nabirds", split="train", streaming=True
     ).cast_column("image", HFImage(decode=False))
     n = 0
-    for r in ds:
+    for r in tqdm(ds, desc="NABirds scanned", unit="images", mininterval=1):
         k = Path(r["path"]).stem
         b = boxes.get(k.replace("-", ""))
         if b:
@@ -393,12 +508,20 @@ def nabirds(m: TextIO, limit: int | None) -> None:
             return
 
 
-def main() -> None:
+def check_existing_resolution(output_dir: Path, size: tuple[int, int]) -> None:
+    previous_config = output_dir / "build-config.json"
+    if previous_config.is_file():
+        previous = json.loads(previous_config.read_text())
+        if (previous["width"], previous["height"]) != size:
+            raise ValueError("Existing dataset resolution differs; use a new --output-dir")
+
+
+def main() -> None:  # noqa: C901
     names = ["openimages", "coco2017", "voc2012", "birdsnap", "nabirds"]
     p = argparse.ArgumentParser()
-    p.add_argument("--output-dir", required=True, type=Path)
-    p.add_argument("--width", required=True, type=int)
-    p.add_argument("--height", required=True, type=int)
+    p.add_argument("--output-dir", default=CONFIG.output_dir, type=Path)
+    p.add_argument("--width", default=640, type=int)
+    p.add_argument("--height", default=640, type=int)
     p.add_argument(
         "--source-cache",
         type=Path,
@@ -407,37 +530,52 @@ def main() -> None:
     )
     p.add_argument("--sources", nargs="+", choices=names, default=names)
     p.add_argument("--limit-per-source", type=int)
+    p.add_argument(
+        "--coco-negative-ratio",
+        type=int,
+        default=3,
+        help="Maximum COCO no-bird images per bird image (default: %(default)s)",
+    )
     a = p.parse_args()
     if a.width < 1 or a.height < 1:
         raise ValueError("Output width and height must be positive")
+    if a.limit_per_source is not None and a.limit_per_source < 1:
+        raise ValueError("Limit per source must be positive")
+    if a.coco_negative_ratio < 0:
+        raise ValueError("COCO negative ratio must be nonnegative")
+    CONFIG.coco_negative_ratio = a.coco_negative_ratio
     CONFIG.output_dir = a.output_dir.resolve()
     CONFIG.source_cache = a.source_cache.resolve()
     CONFIG.size = (a.width, a.height)
+    check_existing_resolution(CONFIG.output_dir, CONFIG.size)
     for sp in ("train", "val"):
-        (CONFIG.output_dir / "images" / sp).mkdir(parents=True, exist_ok=True)
-        (CONFIG.output_dir / "labels" / sp).mkdir(parents=True, exist_ok=True)
+        for label in ("bird", "no_bird"):
+            (CONFIG.output_dir / sp / label).mkdir(parents=True, exist_ok=True)
     CONFIG.source_cache.mkdir(parents=True, exist_ok=True)
-    (CONFIG.output_dir / "data.yaml").write_text(
-        f"path: {CONFIG.output_dir}\ntrain: images/train\nval: images/val\nnames:\n  0: bird\n"
-    )
     (CONFIG.output_dir / "build-config.json").write_text(
         json.dumps(
             {
+                "format": "imagefolder",
+                "targets": {"no_bird": 0, "bird": 1},
                 "width": CONFIG.size[0],
                 "height": CONFIG.size[1],
                 "source_cache": str(CONFIG.source_cache),
                 "sources": a.sources,
+                "coco_negative_ratio": CONFIG.coco_negative_ratio,
             },
             indent=2,
         )
         + "\n"
     )
     manifest_path = CONFIG.output_dir / "manifest.jsonl"
+    if "coco2017" in a.sources:
+        prune_coco_negatives(CONFIG.source_cache / "coco.zip", manifest_path)
     if manifest_path.exists():
         for line in manifest_path.read_text().splitlines():
             try:
                 r = json.loads(line)
-                SEEN.add((r["source"], str(r["source_id"])))
+                if (CONFIG.output_dir / r["image"]).is_file():
+                    SEEN.add((r["source"], str(r["source_id"])))
             except (json.JSONDecodeError, KeyError):
                 pass
     funcs = {
@@ -448,10 +586,10 @@ def main() -> None:
         "nabirds": nabirds,
     }
     with manifest_path.open("a", buffering=1) as m:
-        for name in a.sources:
-            print(f"[{time.strftime('%F %T')}] starting {name}", flush=True)
+        for name in tqdm(a.sources, desc="Sources", unit="source", position=0):
+            tqdm.write(f"[{time.strftime('%F %T')}] starting {name}")
             funcs[name](m, a.limit_per_source)
-            print(f"[{time.strftime('%F %T')}] finished {name}", flush=True)
+            tqdm.write(f"[{time.strftime('%F %T')}] finished {name}")
 
 
 if __name__ == "__main__":

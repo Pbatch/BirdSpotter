@@ -9,12 +9,10 @@ from statistics import mean, median
 from time import perf_counter
 
 import cv2
-import numpy as np
 
-from birdspotter.crop import expanded_crop
-from birdspotter.detection import BirdDetector, letterbox
-from birdspotter.models import default_weights_dir, detector_path, sam21_openvino_dir
-from birdspotter.sam21_openvino import Sam21OpenVinoSegmenter, preprocess_image, scale_box
+from birdspotter.classification import BirdClassifier
+from birdspotter.models import classifier_path, default_weights_dir, sam3_openvino_dir
+from birdspotter.sam3_openvino import Sam3OpenVinoSegmenter, preprocess_image
 
 
 def benchmark(name: str, call: Callable[[], object], *, runs: int) -> None:
@@ -47,49 +45,27 @@ def main() -> None:
         raise ValueError(f"Could not decode benchmark image: {args.image}")
 
     weights_dir = default_weights_dir()
-    detector = BirdDetector(detector_path(weights_dir))
-    segmenter = Sam21OpenVinoSegmenter(sam21_openvino_dir(weights_dir))
-    prepared, _, _ = letterbox(image, detector.input_shape)
-    detector_tensor = (
-        np.ascontiguousarray(prepared[:, :, ::-1].transpose(2, 0, 1)[None], dtype=np.float32)
-        / 255.0
-    )
-    segmenter_tensor, resized_shape = preprocess_image(image)
-    image_embeddings, high_res_256, high_res_128 = segmenter.encoder([segmenter_tensor]).values()
-    centre_box = (
-        image.shape[1] * 0.25,
-        image.shape[0] * 0.25,
-        image.shape[1] * 0.75,
-        image.shape[0] * 0.75,
-    )
-    mask_inputs = {
-        "image_embeddings": image_embeddings,
-        "point_coordinates": scale_box(centre_box, image.shape[:2], resized_shape),
-        "point_labels": np.array([[2, 3]], dtype=np.int32),
-        "high_res_features_256": high_res_256,
-        "high_res_features_128": high_res_128,
-    }
-    detections = detector.detect(image)
-    if not detections:
+    classifier = BirdClassifier(classifier_path(weights_dir))
+    segmenter = Sam3OpenVinoSegmenter(sam3_openvino_dir(weights_dir))
+    classifier_tensor = classifier.preprocess(image)
+    segmenter_tensor = preprocess_image(image)
+    if not classifier.classify(image):
         raise RuntimeError("Benchmark image contains no detected bird")
-    crop, crop_box = expanded_crop(image, detections[0].box)
 
-    benchmark("detector OpenVINO", lambda: detector.backend.run(detector_tensor), runs=args.runs)
     benchmark(
-        "SAM image encoder OpenVINO", lambda: segmenter.encoder([segmenter_tensor]), runs=args.runs
+        "classifier OpenVINO", lambda: classifier.backend.run(classifier_tensor), runs=args.runs
     )
     benchmark(
-        "SAM mask predictor OpenVINO", lambda: segmenter.mask_predictor(mask_inputs), runs=args.runs
+        "SAM 3 OpenVINO", lambda: segmenter.backend({"image": segmenter_tensor}), runs=args.runs
     )
-    benchmark("detector application", lambda: detector.detect(image), runs=args.runs)
-    benchmark("SAM application", lambda: segmenter.segment(crop, crop_box), runs=args.runs)
+    benchmark("classifier application", lambda: classifier.classify(image), runs=args.runs)
+    benchmark("SAM 3 application", lambda: segmenter.segment(image), runs=args.runs)
 
-    def detector_plus_sam() -> None:
-        current_detection = detector.detect(image)[0]
-        current_crop, current_box = expanded_crop(image, current_detection.box)
-        segmenter.segment(current_crop, current_box)
+    def classifier_plus_sam() -> None:
+        if classifier.classify(image):
+            segmenter.segment(image)
 
-    benchmark("detector plus SAM", detector_plus_sam, runs=max(1, args.runs // 2))
+    benchmark("classifier plus SAM", classifier_plus_sam, runs=max(1, args.runs // 2))
 
 
 if __name__ == "__main__":

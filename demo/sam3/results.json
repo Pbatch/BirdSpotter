@@ -1,0 +1,92 @@
+[
+  {
+    "image": "1.png",
+    "prompt": "bird",
+    "scores": [
+      0.9189453125
+    ],
+    "boxes": [
+      [
+        367.0,
+        64.5,
+        413.0,
+        102.125
+      ]
+    ],
+    "inference_seconds": 0.9105191650014604,
+    "device": "cuda",
+    "peak_gpu_memory_mb": 1984.8564453125
+  },
+  {
+    "image": "2.png",
+    "prompt": "bird",
+    "scores": [
+      0.94921875
+    ],
+    "boxes": [
+      [
+        250.5,
+        177.375,
+        279.5,
+        255.625
+      ]
+    ],
+    "inference_seconds": 0.39696937600092497,
+    "device": "cuda",
+    "peak_gpu_memory_mb": 1984.85693359375
+  },
+  {
+    "image": "3.png",
+    "prompt": "bird",
+    "scores": [
+      0.97216796875
+    ],
+    "boxes": [
+      [
+        235.25,
+        88.25,
+        297.0,
+        141.875
+      ]
+    ],
+    "inference_seconds": 0.3955620680026186,
+    "device": "cuda",
+    "peak_gpu_memory_mb": 1984.85693359375
+  },
+  {
+    "image": "4.png",
+    "prompt": "bird",
+    "scores": [
+      0.93701171875
+    ],
+    "boxes": [
+      [
+        137.0,
+        240.125,
+        178.25,
+        267.5
+      ]
+    ],
+    "inference_seconds": 0.39340996900136815,
+    "device": "cuda",
+    "peak_gpu_memory_mb": 1984.85693359375
+  },
+  {
+    "image": "5.png",
+    "prompt": "bird",
+    "scores": [
+      0.96240234375
+    ],
+    "boxes": [
+      [
+        221.625,
+        115.3125,
+        303.25,
+        167.625
+      ]
+    ],
+    "inference_seconds": 0.3950518749988987,
+    "device": "cuda",
+    "peak_gpu_memory_mb": 1984.85693359375
+  }
+]

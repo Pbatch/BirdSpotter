@@ -4,25 +4,18 @@
 the licences governing third-party packages, model checkpoints, or artifacts
 derived from those checkpoints.
 
-## SAM 2.1 Hiera Large
+## SAM 3
 
-The export script downloads Meta's `sam2.1_hiera_large.pt` checkpoint from its
-official Hugging Face repository and converts it to OpenVINO IR. Meta licenses
-the SAM 2 model checkpoints under the
-[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). If you
-redistribute the checkpoint or the generated SAM artifacts, preserve the
-applicable Apache-2.0 licence and notices from the
-[SAM 2 repository](https://github.com/facebookresearch/sam2).
+The export script downloads Meta's `facebook/sam3` checkpoint and converts it
+to a fixed-prompt OpenVINO model. The checkpoint and derived artifacts are
+subject to the upstream [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE).
+Preserve the applicable license and notices when redistributing model artifacts.
 
-## Ultralytics YOLO26
+## MobileNetV4
 
-The export script downloads BirdSpotter's fine-tuned YOLO26s checkpoint, which
-is derived from Ultralytics' pretrained model, and produces a bird-only
-OpenVINO detector from it. Ultralytics makes YOLO26 code, models, and
-documentation available under AGPL-3.0 by default, with a separate Enterprise
-licence available for uses that do not meet AGPL-3.0 obligations. See the
-[Ultralytics licence terms](https://www.ultralytics.com/license) before using or
-distributing the YOLO checkpoint or its generated OpenVINO artifacts.
+Training uses timm's `mobilenetv4_conv_small.e2400_r224_in1k` ImageNet checkpoint.
+See the upstream [model card](https://huggingface.co/timm/mobilenetv4_conv_small.e2400_r224_in1k)
+for its Apache-2.0 licence and model details.
 
 This repository does not contain either checkpoint or generated runtime model
 artifacts. Source checkpoints remain in the Hugging Face cache, and generated

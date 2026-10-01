@@ -151,7 +151,7 @@ class Capture:
             return self._latest_source
 
     def set_roi(self, roi: Roi | None) -> None:
-        """Apply a validated ROI to subsequent detector frames."""
+        """Apply a validated ROI to subsequent classifier frames."""
 
         with self._condition:
             if self._latest_source is not None:
