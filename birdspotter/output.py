@@ -1,7 +1,8 @@
-"""Creation of segmented bird and full-frame gallery images."""
+"""Creation of segmented bird images and per-window sighting data."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import cv2
@@ -56,64 +57,68 @@ def write_image(
     return output_path
 
 
-def make_gallery_frame(
-    image_bgr: np.ndarray,
-    crop_mask: np.ndarray,
-    crop_origin: tuple[int, int],
-    bird_box: tuple[float, float, float, float],
+def write_window(  # noqa: PLR0913
+    window_dir: Path,
+    source_bgr: np.ndarray,
+    roi: tuple[int, int, int, int] | None,
+    crop_mask: np.ndarray | None,
     *,
-    background_brightness: float = 0.3,
-) -> np.ndarray:
-    """Dim pixels outside a crop-local mask and outline the bird."""
-
-    if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
-        raise ValueError("Gallery image must be an HxWx3 BGR image")
-    if crop_mask.ndim != 2:
-        raise ValueError("Gallery mask must be two-dimensional")
-    if not 0 <= background_brightness <= 1:
-        raise ValueError("Background brightness must be between zero and one")
-
-    frame_height, frame_width = image_bgr.shape[:2]
-    origin_x, origin_y = crop_origin
-    mask_height, mask_width = crop_mask.shape
-    if (
-        origin_x < 0
-        or origin_y < 0
-        or origin_x + mask_width > frame_width
-        or origin_y + mask_height > frame_height
-    ):
-        raise ValueError("Crop mask falls outside the gallery image")
-
-    full_mask = np.zeros((frame_height, frame_width), dtype=bool)
-    full_mask[origin_y : origin_y + mask_height, origin_x : origin_x + mask_width] = crop_mask
-    output = np.rint(image_bgr.astype(np.float32) * background_brightness).astype(np.uint8)
-    output[full_mask] = image_bgr[full_mask]
-
-    x1, y1, x2, y2 = bird_box
-    top_left = (round(x1), round(y1))
-    bottom_right = (round(x2), round(y2))
-    thickness = max(2, round(min(frame_height, frame_width) / 400))
-    cv2.rectangle(output, top_left, bottom_right, (80, 220, 80), thickness, cv2.LINE_AA)
-    return output
-
-
-def write_gallery_frame(
-    output_path: Path,
-    image_bgr: np.ndarray,
-    crop_mask: np.ndarray,
-    crop_origin: tuple[int, int],
-    bird_box: tuple[float, float, float, float],
+    confidence: float | None,
+    sam_confidence: float | None,
 ) -> Path:
-    """Atomically write a full-frame gallery visualization."""
+    """Atomically write one selection window's frame, optional mask, and label.
+
+    ``source_bgr`` is the uncropped camera frame and ``crop_mask`` is SAM's mask
+    over the ROI crop. The label stores the ROI and bbox in full-frame pixels, and
+    the mask is saved cropped to that bbox. A missing mask means no bird was
+    segmented, and the bbox is then null. The label is written last so its
+    presence marks a complete window.
+    """
+
+    height, width = source_bgr.shape[:2]
+    left, top, right, bottom = roi if roi is not None else (0, 0, width, height)
+    if crop_mask is not None and crop_mask.shape != (bottom - top, right - left):
+        raise ValueError("Mask dimensions differ from the ROI")
+    window_dir.mkdir(parents=True, exist_ok=True)
+    write_frame(window_dir / "full_frame.jpg", source_bgr)
+    bbox = None
+    if crop_mask is not None:
+        x1, y1, x2, y2 = mask_bounds(crop_mask)
+        bbox = [left + x1, top + y1, left + x2, top + y2]
+        _write_encoded(
+            window_dir / "mask.png",
+            np.where(crop_mask[y1:y2, x1:x2], 255, 0).astype(np.uint8),
+            [],
+        )
+    label = {
+        "width": width,
+        "height": height,
+        "roi": list(roi) if roi is not None else None,
+        "bbox": bbox,
+        "confidence": confidence,
+        "sam_confidence": sam_confidence,
+    }
+    label_path = window_dir / "label.json"
+    temporary = label_path.with_name(f".{label_path.name}.part")
+    temporary.write_text(json.dumps(label, indent=2) + "\n")
+    temporary.replace(label_path)
+    return label_path
+
+
+def write_frame(output_path: Path, image_bgr: np.ndarray) -> Path:
+    """Atomically write a full camera frame as a JPEG."""
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    visualization = make_gallery_frame(image_bgr, crop_mask, crop_origin, bird_box)
-    temporary_output = output_path.with_name(f".{output_path.name}.part.png")
-    if not cv2.imwrite(str(temporary_output), visualization):
-        raise OSError(f"Failed to write {temporary_output}")
-    try:
-        temporary_output.replace(output_path)
-    except Exception:
-        temporary_output.unlink(missing_ok=True)
-        raise
+    _write_encoded(output_path, image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     return output_path
+
+
+def _write_encoded(output_path: Path, image: np.ndarray, params: list[int]) -> None:
+    """Encode an image and atomically move it into place."""
+
+    encoded, payload = cv2.imencode(output_path.suffix, image, params)
+    if not encoded:
+        raise OSError(f"Failed to encode {output_path}")
+    temporary = output_path.with_name(f".{output_path.name}.part")
+    temporary.write_bytes(payload.tobytes())
+    temporary.replace(output_path)

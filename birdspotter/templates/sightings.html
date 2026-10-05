@@ -1,7 +1,11 @@
 {% for bird in sightings %}
 <figure class="bird-card">
-  <a href="{{ bird.image_url }}">
-    <img src="{{ bird.image_url }}" alt="Bird detected at {{ bird.timestamp }}" loading="lazy">
+  <a href="{{ bird.frame_url }}">
+    <canvas class="sighting" width="{{ bird.width }}" height="{{ bird.height }}"
+            data-frame="{{ bird.frame_url }}"
+            data-mask="{{ bird.mask_url }}" data-roi="{{ bird.roi }}"
+            data-bbox="{{ bird.bbox }}" role="img"
+            aria-label="Bird detected at {{ bird.timestamp }}"></canvas>
   </a>
   <figcaption>{{ bird.timestamp }} - {{ bird.confidence }}% conf</figcaption>
 </figure>

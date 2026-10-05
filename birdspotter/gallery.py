@@ -31,9 +31,8 @@ LONDON_TIMEZONE = ZoneInfo("Europe/London")
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
 TEMPLATE_DIR = PACKAGE_DIR / "templates"
-BIRD_FILENAME = re.compile(
-    r"^bird_conf_(?P<confidence>\d+)_ts_(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2})\.png$"
-)
+WINDOW_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$")
+WINDOW_FILES = {"full_frame.jpg": "image/jpeg", "mask.png": "image/png"}
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 
@@ -68,35 +67,47 @@ def london_timestamp(filename_timestamp: str) -> str:
 
 
 def recent_birds(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> list[Path]:
-    """Return the newest generated bird images, newest first."""
+    """Return the newest window directories containing a segmented bird, newest first."""
 
-    candidates = (
-        path
-        for path in output_dir.iterdir()
-        if path.is_file() and BIRD_FILENAME.fullmatch(path.name)
-    )
-    return sorted(
-        candidates,
-        key=lambda path: (path.stat().st_mtime_ns, path.name),
+    birds = []
+    windows = sorted(
+        (
+            path
+            for path in output_dir.iterdir()
+            if path.is_dir() and WINDOW_NAME.fullmatch(path.name)
+        ),
+        key=lambda path: path.name,
         reverse=True,
-    )[:limit]
+    )
+    for window in windows:
+        label_path = window / "label.json"
+        if not window.is_dir() or not label_path.is_file() or not (window / "mask.png").is_file():
+            continue
+        if json.loads(label_path.read_text()).get("bbox") is None:
+            continue
+        birds.append(window)
+        if len(birds) == limit:
+            break
+    return birds
 
 
-def sighting_context(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> list[dict[str, str]]:
-    """Build template values for the latest sightings."""
+def sighting_context(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> list[dict]:
+    """Build template values for the latest sightings, composed in the browser."""
 
     sightings = []
-    for path in recent_birds(output_dir, limit):
-        match = BIRD_FILENAME.fullmatch(path.name)
-        if match is None:  # pragma: no cover - filtered by recent_birds
-            continue
-        gallery_path = output_dir / "gallery" / path.name
-        route = "frames" if gallery_path.is_file() else "birds"
+    for window in recent_birds(output_dir, limit):
+        label = json.loads((window / "label.json").read_text())
+        roi = label.get("roi") or [0, 0, label["width"], label["height"]]
         sightings.append(
             {
-                "confidence": match.group("confidence"),
-                "timestamp": london_timestamp(match.group("timestamp")),
-                "image_url": f"/{route}/{path.name}",
+                "confidence": round(label["confidence"] * 100),
+                "timestamp": london_timestamp(window.name),
+                "frame_url": f"/windows/{window.name}/full_frame.jpg",
+                "mask_url": f"/windows/{window.name}/mask.png",
+                "width": roi[2] - roi[0],
+                "height": roi[3] - roi[1],
+                "roi": ",".join(str(int(value)) for value in roi),
+                "bbox": ",".join(str(int(value)) for value in label["bbox"]),
             }
         )
     return sightings
@@ -246,36 +257,22 @@ async def update_roi(request: Request) -> Response:
     return JSONResponse({"roi": roi})
 
 
-def output_image(request: Request, *, gallery_frame: bool = False) -> Response:
-    """Safely return a generated image from the requested output collection."""
+def window_file(request: Request) -> Response:
+    """Safely return a saved full frame or bird mask for browser-side composition."""
 
+    window = request.path_params["window"]
     filename = request.path_params["filename"]
-    if Path(filename).name != filename or BIRD_FILENAME.fullmatch(filename) is None:
+    if WINDOW_NAME.fullmatch(window) is None or filename not in WINDOW_FILES:
         raise HTTPException(404)
-    directory: Path = request.app.state.output_dir
-    if gallery_frame:
-        directory = directory / "gallery"
-    directory = directory.resolve()
-    path = directory / filename
-    if path.resolve().parent != directory or not path.is_file():
+    directory = request.app.state.output_dir.resolve()
+    path = directory / window / filename
+    if path.resolve().parent.parent != directory or not path.is_file():
         raise HTTPException(404)
     return FileResponse(
         path,
-        media_type="image/png",
+        media_type=WINDOW_FILES[filename],
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
-
-
-def bird_image(request: Request) -> Response:
-    """Return a segmented bird image."""
-
-    return output_image(request)
-
-
-def highlighted_frame(request: Request) -> Response:
-    """Return a full frame with the bird highlighted."""
-
-    return output_image(request, gallery_frame=True)
 
 
 def create_gallery_app(
@@ -295,8 +292,7 @@ def create_gallery_app(
         Route("/camera.jpg", camera_frame, name="camera"),
         Route("/roi.json", roi_state, name="roi-state"),
         Route("/roi", update_roi, methods=["POST"], name="roi-update"),
-        Route("/birds/{filename}", bird_image, name="bird"),
-        Route("/frames/{filename}", highlighted_frame, name="frame"),
+        Route("/windows/{window}/{filename}", window_file, name="window-file"),
         Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
     ]
     app = Starlette(routes=routes)

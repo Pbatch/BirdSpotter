@@ -7,9 +7,10 @@ import os
 import sys
 import time
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
+from typing import NoReturn
 
 from loguru import logger
 
@@ -22,7 +23,7 @@ from birdspotter.gallery import (
     write_roi_config,
 )
 from birdspotter.models import classifier_path, default_weights_dir, sam3_openvino_dir
-from birdspotter.output import mask_bounds, write_gallery_frame, write_image
+from birdspotter.output import write_window
 from birdspotter.sam3_openvino import Sam3OpenVinoSegmenter
 from birdspotter.types import BirdCandidate
 
@@ -43,26 +44,19 @@ def configure_logging(log_level: str) -> None:
     )
 
 
-def rounded_to_five_minutes(timestamp: datetime) -> datetime:
-    """Round a UTC timestamp to its nearest five-minute boundary."""
+def window_start(timestamp: datetime) -> datetime:
+    """Return the start of the clock-aligned five-minute UTC window containing a timestamp."""
 
     timestamp = timestamp.astimezone(UTC)
-    elapsed = timedelta(
-        minutes=timestamp.minute,
-        seconds=timestamp.second,
-        microseconds=timestamp.microsecond,
+    return timestamp.replace(
+        minute=timestamp.minute - timestamp.minute % WINDOW_MINUTES, second=0, microsecond=0
     )
-    interval = timedelta(minutes=WINDOW_MINUTES)
-    rounded_intervals = (elapsed + interval / 2) // interval
-    return timestamp.replace(minute=0, second=0, microsecond=0) + rounded_intervals * interval
 
 
-def output_path(output_dir: Path, candidate: BirdCandidate) -> Path:
-    """Return the required confidence-and-time based final PNG path."""
+def window_dir(output_dir: Path, captured_at: datetime) -> Path:
+    """Return the directory named after the start of a frame's selection window."""
 
-    timestamp = rounded_to_five_minutes(candidate.captured_at)
-    confidence_percent = round(candidate.classification.confidence * 100)
-    return output_dir / f"bird_conf_{confidence_percent}_ts_{timestamp:%Y-%m-%d_%H-%M}.png"
+    return output_dir / f"{window_start(captured_at):%Y-%m-%d_%H-%M}"
 
 
 def save_candidate(
@@ -70,28 +64,47 @@ def save_candidate(
     segmenter: Sam3OpenVinoSegmenter,
     output_dir: Path,
 ) -> Path:
-    """Segment and save one selected bird as a transparent PNG."""
+    """Segment one selected bird and save its window frame, mask, and label."""
 
     started = time.perf_counter()
     mask, sam_score = segmenter.segment(candidate.frame_bgr)
-    saved = write_image(output_path(output_dir, candidate), candidate.frame_bgr, mask)
-    write_gallery_frame(
-        output_dir / "gallery" / saved.name,
-        candidate.frame_bgr,
+    if not mask.any():
+        logger.warning("Rejected selected bird | error=SAM 3 returned an empty mask")
+        mask = None
+    saved = write_window(
+        window_dir(output_dir, candidate.captured_at),
+        candidate.frame_bgr if candidate.source_bgr is None else candidate.source_bgr,
+        candidate.roi,
         mask,
-        (0, 0),
-        mask_bounds(mask),
+        confidence=candidate.classification.confidence,
+        sam_confidence=sam_score,
     )
     logger.info(
-        "Saved bird | frame={} confidence={:.3f} classifier_seconds={:.3f} "
-        "sam_score={:.3f} segmentation_seconds={:.3f} path={}",
+        "Saved window | frame={} confidence={:.3f} classifier_seconds={:.3f} "
+        "sam_score={:.3f} segmentation_seconds={:.3f} bird={} path={}",
         candidate.frame_sequence,
         candidate.classification.confidence,
         candidate.classifier_seconds,
         sam_score,
         time.perf_counter() - started,
-        saved,
+        mask is not None,
+        saved.parent,
     )
+    return saved
+
+
+def save_empty_window(frame: CapturedFrame, output_dir: Path) -> Path:
+    """Save the full frame and label for a window that produced no bird."""
+
+    saved = write_window(
+        window_dir(output_dir, frame.captured_at),
+        frame.uncropped_bgr,
+        frame.roi,
+        None,
+        confidence=None,
+        sam_confidence=None,
+    )
+    logger.info("Saved window without bird | path={}", saved.parent)
     return saved
 
 
@@ -161,6 +174,8 @@ def update_window_winner(
         frame_sequence=frame.sequence,
         captured_at=frame.captured_at,
         classifier_seconds=classifier_seconds,
+        source_bgr=frame.uncropped_bgr.copy(),
+        roi=frame.roi,
     )
     if (
         current is not None
@@ -185,20 +200,13 @@ def save_best_candidate(
     candidate: BirdCandidate | None,
     segmenter: Sam3OpenVinoSegmenter,
     output_dir: Path,
-    *,
-    partial_window: bool = False,
 ) -> None:
     """Segment and save a window winner when one exists."""
 
     if candidate is None:
         return
-    try:
-        saved = save_candidate(candidate, segmenter, output_dir)
-    except ValueError as error:
-        logger.warning("Rejected selected bird | error={}", error)
-    else:
-        label = "final partial-window bird" if partial_window else "bird"
-        logger.info("Completed {} | path={}", label, saved)
+    saved = save_candidate(candidate, segmenter, output_dir)
+    logger.info("Completed window | path={}", saved.parent)
 
 
 def run_classification_loop(
@@ -206,14 +214,13 @@ def run_classification_loop(
     classifier: BirdClassifier,
     segmenter: Sam3OpenVinoSegmenter,
     output_dir: Path,
-) -> BirdCandidate | None:
-    """Run classifier windows and return any unsaved partial-window winner."""
+) -> NoReturn:
+    """Run classifier windows forever, saving each completed window."""
 
-    started = time.monotonic()
-    window_started = started
-    next_classification = started
+    next_classification = time.monotonic()
     sequence = 0
     best: BirdCandidate | None = None
+    latest: CapturedFrame | None = None
     roi_revision = 0
     while True:
         now = time.monotonic()
@@ -223,6 +230,23 @@ def run_classification_loop(
 
         frame = camera.newest(after_sequence=sequence)
         sequence = frame.sequence
+        # Windows are aligned to the UTC clock; the first frame of a new window
+        # closes the previous one, whose frames all share its directory name.
+        if latest is not None and window_start(frame.captured_at) != window_start(
+            latest.captured_at
+        ):
+            if best is None:
+                logger.info("Selection window complete | no bird passed the confidence threshold")
+                save_empty_window(latest, output_dir)
+            else:
+                logger.info(
+                    "Selection window complete | winner_frame={} winner_confidence={:.3f}",
+                    best.frame_sequence,
+                    best.classification.confidence,
+                )
+            save_best_candidate(best, segmenter, output_dir)
+            best = None
+        latest = frame
         if frame.roi_revision != roi_revision:
             logger.info("Classification ROI changed | discarding current window candidate")
             best = None
@@ -232,20 +256,6 @@ def run_classification_loop(
         # This preserves the requested cadence when inference is fast and naturally
         # skips the wait when an inference call overruns its one-second budget.
         next_classification += 1 / CLASSIFIER_FPS
-        if time.monotonic() - window_started >= WINDOW_MINUTES * 60:
-            if best is None:
-                logger.info("Selection window complete | no bird passed the confidence threshold")
-            else:
-                logger.info(
-                    "Selection window complete | winner_frame={} winner_confidence={:.3f}",
-                    best.frame_sequence,
-                    best.classification.confidence,
-                )
-            save_best_candidate(best, segmenter, output_dir)
-            best = None
-            window_started = time.monotonic()
-            next_classification = window_started
-    return best
 
 
 def main() -> None:
@@ -298,13 +308,8 @@ def main() -> None:
             args.web_host,
             gallery_server.server_port,
         )
-        try:
-            logger.info("Camera settings | {}", camera.actual_settings())
-            best = run_classification_loop(camera, classifier, segmenter, output_dir)
-            save_best_candidate(best, segmenter, output_dir, partial_window=True)
-        finally:
-            gallery_server.shutdown()
-            gallery_server.server_close()
+        logger.info("Camera settings | {}", camera.actual_settings())
+        run_classification_loop(camera, classifier, segmenter, output_dir)
 
 
 if __name__ == "__main__":

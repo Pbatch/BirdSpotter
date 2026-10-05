@@ -37,6 +37,14 @@ class CapturedFrame:
     captured_at: datetime
     image_bgr: np.ndarray
     roi_revision: int = 0
+    source_bgr: np.ndarray | None = None
+    roi: Roi | None = None
+
+    @property
+    def uncropped_bgr(self) -> np.ndarray:
+        """Return the frame before ROI cropping."""
+
+        return self.image_bgr if self.source_bgr is None else self.source_bgr
 
 
 class Capture:
@@ -115,6 +123,8 @@ class Capture:
                         captured_at,
                         crop_to_roi(image, self.roi),
                         self._roi_revision,
+                        image,
+                        self.roi,
                     )
                     self._condition.notify_all()
         except Exception as error:  # noqa: BLE001 -- thread boundary reports failures to caller
@@ -165,6 +175,8 @@ class Capture:
                     source.captured_at,
                     crop_to_roi(source.image_bgr, roi),
                     self._roi_revision,
+                    source.image_bgr,
+                    roi,
                 )
 
     def close(self) -> None:

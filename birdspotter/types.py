@@ -22,7 +22,9 @@ class BirdCandidate:
     """The best bird seen so far in one selection window."""
 
     classification: Classification
-    frame_bgr: np.ndarray
+    frame_bgr: np.ndarray  # ROI-cropped frame used for classification and segmentation
     frame_sequence: int
     captured_at: datetime
     classifier_seconds: float = 0.0
+    source_bgr: np.ndarray | None = None
+    roi: tuple[int, int, int, int] | None = None

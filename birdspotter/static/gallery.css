@@ -13,7 +13,7 @@ main { max-width: 1100px; margin: auto; padding: 1rem; }
 .bird-card { margin: 0; overflow: hidden; border: 1px solid #33483a; border-radius: 1rem;
              background: #18221b; }
 .bird-card a { display: grid; min-height: 240px; place-items: center; background: #dfe7e1; }
-img { display: block; max-width: 100%; max-height: 420px; object-fit: contain; }
+img, canvas.sighting { display: block; max-width: 100%; max-height: 420px; object-fit: contain; }
 figcaption { padding: .9rem 1rem 1rem; color: #a9baad; white-space: nowrap; }
 .empty { grid-column: 1 / -1; padding: 4rem 1rem; border: 1px dashed #526b59;
          border-radius: 1rem; color: #a9baad; text-align: center; }
@@ -23,3 +23,4 @@ figcaption { padding: .9rem 1rem 1rem; color: #a9baad; white-space: nowrap; }
 .roi-controls { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center;
                 margin-top: 1rem; }
 #roi-status { color: #a9baad; }
+canvas.sighting { width: 100%; height: auto; }

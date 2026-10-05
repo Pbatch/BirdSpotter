@@ -155,17 +155,70 @@ document.querySelector('#roi-full').addEventListener('click', async () => {
   try { await saveRoi(null); draw(); } catch (error) { status.textContent = error; }
 });
 
+const BACKGROUND_BRIGHTNESS = 0.3;
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = url;
+  });
+}
+
+async function drawSighting(target) {
+  // The ROI and bbox are full-frame pixels; the card shows only the ROI.
+  const [left, top, right, bottom] = target.dataset.roi.split(',').map(Number);
+  const [x1, y1, x2, y2] = target.dataset.bbox.split(',').map(Number);
+  const [image, mask] = await Promise.all(
+    [loadImage(target.dataset.frame), loadImage(target.dataset.mask)]);
+  const width = x2 - x1;
+  const height = y2 - y1;
+
+  // Turn the greyscale mask into alpha, then keep only the bird's frame pixels.
+  const bird = document.createElement('canvas');
+  bird.width = width;
+  bird.height = height;
+  const birdContext = bird.getContext('2d');
+  birdContext.drawImage(mask, 0, 0);
+  const pixels = birdContext.getImageData(0, 0, width, height);
+  for (let i = 0; i < pixels.data.length; i += 4) pixels.data[i + 3] = pixels.data[i];
+  birdContext.putImageData(pixels, 0, 0);
+  birdContext.globalCompositeOperation = 'source-in';
+  birdContext.drawImage(image, x1, y1, width, height, 0, 0, width, height);
+
+  target.width = right - left;
+  target.height = bottom - top;
+  const output = target.getContext('2d');
+  output.filter = `brightness(${BACKGROUND_BRIGHTNESS})`;
+  output.drawImage(image, left, top, target.width, target.height,
+                   0, 0, target.width, target.height);
+  output.filter = 'none';
+  output.drawImage(bird, x1 - left, y1 - top);
+  output.strokeStyle = 'rgb(80, 220, 80)';
+  output.lineWidth = Math.max(2, Math.round(Math.min(target.width, target.height) / 400));
+  output.strokeRect(x1 - left, y1 - top, width, height);
+}
+
+function drawSightings() {
+  for (const target of document.querySelectorAll('canvas.sighting')) {
+    drawSighting(target).catch(error => console.debug('Could not draw sighting', error));
+  }
+}
+
 async function refreshSightings() {
   if (document.hidden) return;
   try {
     const response = await fetch('/sightings.html', {cache: 'no-store'});
     if (!response.ok) return;
     document.querySelector('#sightings-grid').innerHTML = await response.text();
+    drawSightings();
   } catch (error) {
     console.debug('Could not refresh sightings', error);
   }
 }
 
+drawSightings();
 setInterval(refreshSightings, 30000);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) refreshSightings();
