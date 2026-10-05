@@ -13,3 +13,5 @@ trained-model/
 data/
 *.part
 /MEMORY.md
+segmented/
+.deploy-backups/
