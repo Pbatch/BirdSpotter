@@ -67,8 +67,12 @@ def save_candidate(
     """Segment one selected bird and save its window frame, mask, and label."""
 
     started = time.perf_counter()
-    mask, sam_score = segmenter.segment(candidate.frame_bgr)
-    if not mask.any():
+    try:
+        mask, sam_score = segmenter.segment(candidate.frame_bgr)
+    except ValueError as error:
+        logger.warning("Rejected selected bird | error={}", error)
+        mask, sam_score = None, None
+    if mask is not None and not mask.any():
         logger.warning("Rejected selected bird | error=SAM 3 returned an empty mask")
         mask = None
     saved = write_window(
@@ -81,7 +85,7 @@ def save_candidate(
     )
     logger.info(
         "Saved window | frame={} confidence={:.3f} classifier_seconds={:.3f} "
-        "sam_score={:.3f} segmentation_seconds={:.3f} bird={} path={}",
+        "sam_score={} segmentation_seconds={:.3f} bird={} path={}",
         candidate.frame_sequence,
         candidate.classification.confidence,
         candidate.classifier_seconds,

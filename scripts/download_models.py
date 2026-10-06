@@ -15,7 +15,6 @@ from typing import Any
 
 from birdspotter.models import classifier_path, default_weights_dir, sam3_openvino_dir
 
-DEFAULT_CLASSIFIER_REPOSITORY = "PBatch23888/birdspotter-mobilenetv4"
 DEFAULT_REVISION = "main"
 CLASSIFIER_MODEL_PREFIX = "openvino/"
 SAM3_MODEL_PREFIX = "openvino-504/"
