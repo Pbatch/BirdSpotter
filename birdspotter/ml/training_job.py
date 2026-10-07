@@ -36,10 +36,12 @@ class TrainingConfig:
     image_size: int = 640
     wandb_project: str = "birdspotter-mobilenetv4"
     wandb_entity: str = ""
-    model_variant: str = "large"
-    learning_rate: float = 0.0003
-    drop_path_rate: float = 0.0
+    model_variant: str = "small"
+    learning_rate: float = 0.0001
+    drop_path_rate: float = 0.1
     loss_function: str = "bce"
+    # Comma-separated train-only tars (e.g. private synthetic data) extracted over dataset_tar.
+    extra_dataset_tars: str = ""
 
     def __post_init__(self) -> None:
         if not 0 < self.learning_rate < float("inf"):
@@ -81,6 +83,13 @@ class ClassifierTrainingJob:
     root: Path
     commit: Callable[[], None]
 
+    def extract_datasets(self, data: Path) -> None:
+        """Extract the dataset tar, then any extra train-only tars, into one ImageFolder tree."""
+        tars = [self.config.dataset_tar, *self.config.extra_dataset_tars.split(",")]
+        for tar in filter(None, (tar.strip() for tar in tars)):
+            with tarfile.open(self.root / tar.lstrip("/")) as source:
+                source.extractall(data, filter="data")
+
     def run(self) -> None:
         dataset_tar = self.config.dataset_tar
         run_name = self.config.run_name
@@ -115,8 +124,7 @@ class ClassifierTrainingJob:
 
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary)
-            with tarfile.open(root / dataset_tar.lstrip("/")) as source:
-                source.extractall(data, filter="data")
+            self.extract_datasets(data)
             datasets = {
                 split: ImageFolder(
                     data / split,
@@ -167,6 +175,7 @@ class ClassifierTrainingJob:
                 wandb_logger.log_hyperparams(
                     {
                         "dataset_tar": dataset_tar,
+                        "extra_dataset_tars": self.config.extra_dataset_tars,
                         "batch_size": batch_size,
                         "epochs": epochs,
                         "precision": precision,

@@ -52,10 +52,11 @@ class ModalClassifierTrainer:
         image_size: int = 640,
         wandb_project: str = "birdspotter-mobilenetv4",
         wandb_entity: str = "",
-        model_variant: str = "large",
-        learning_rate: float = 0.0003,
-        drop_path_rate: float = 0.0,
+        model_variant: str = "small",
+        learning_rate: float = 0.0001,
+        drop_path_rate: float = 0.1,
         loss_function: str = "bce",
+        extra_dataset_tars: str = "",
     ) -> None:
         config = TrainingConfig(
             dataset_tar,
@@ -71,25 +72,27 @@ class ModalClassifierTrainer:
             learning_rate,
             drop_path_rate,
             loss_function,
+            extra_dataset_tars,
         )
         ClassifierTrainingJob(config, Path("/mnt/birdspotter"), volume.commit).run()
 
 
 @app.local_entrypoint()
 def main(  # noqa: PLR0913, PLR0917
-    dataset_tar: str = "/datasets/classifier_birds.tar.gz",
+    dataset_tar: str = "/datasets/classifier_birds-clean-20261006.tar.gz",
     run_name: str = "mobilenetv4-bird-640",
     epochs: int = 10,
-    batch_size: int = 32,
+    batch_size: int = 128,
     resume_checkpoint: str = "",
     precision: str = "bf16-mixed",
     image_size: int = 640,
     wandb_project: str = "birdspotter-mobilenetv4",
     wandb_entity: str = "",
-    model_variant: str = "large",
-    learning_rate: float = 0.0003,
-    drop_path_rate: float = 0.0,
+    model_variant: str = "small",
+    learning_rate: float = 0.0001,
+    drop_path_rate: float = 0.1,
     loss_function: str = "bce",
+    extra_dataset_tars: str = "",
 ) -> None:
     submission_dir = Path("data/modal-runs")
     submission_dir.mkdir(parents=True, exist_ok=True)
@@ -107,6 +110,7 @@ def main(  # noqa: PLR0913, PLR0917
         learning_rate,
         drop_path_rate,
         loss_function,
+        extra_dataset_tars,
     )
     dashboard_url = app.get_dashboard_url()
     print(f"Submitted training run: {run_name}")
@@ -123,6 +127,7 @@ def main(  # noqa: PLR0913, PLR0917
         "drop_path_rate": drop_path_rate,
         "loss_function": loss_function,
         "dataset_tar": dataset_tar,
+        "extra_dataset_tars": extra_dataset_tars,
         "epochs": epochs,
         "batch_size": batch_size,
         "image_size": image_size,

@@ -89,3 +89,16 @@ def test_upload_uses_repo_type_and_checksums(
     with pytest.raises(ValueError, match="changed or missing"):
         hf_packaging.upload_package(tmp_path, "owner/birds", repo_type="dataset")
     assert api.upload_folder.call_count == 1
+
+
+def test_dataset_package_refuses_private_synthetic_images(tmp_path: Path) -> None:
+    source = tmp_path / "dataset"
+    for split in ("train", "val"):
+        for label in ("bird", "no_bird"):
+            folder = source / split / label
+            folder.mkdir(parents=True)
+            Image.new("RGB", (640, 640), "red").save(folder / "example.jpg")
+    Image.new("RGB", (640, 640), "red").save(source / "train/bird/synthetic_run_000000.jpg")
+    with pytest.raises(ValueError, match="private synthetic"):
+        package_dataset(source, tmp_path / "package")
+    assert not (tmp_path / "package").exists()

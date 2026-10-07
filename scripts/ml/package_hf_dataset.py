@@ -17,6 +17,8 @@ from birdspotter.ml.hf_packaging import (
 
 REPOSITORY = "PBatch23888/birds-classification"
 ARCHIVE_NAME = "classifier_birds.tar.gz"
+# Synthetic generations stay private; see package_synthetic_dataset.py.
+PRIVATE_PREFIX = "synthetic_"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".ppm", ".pgm"}
 
 
@@ -42,6 +44,8 @@ def package_dataset(dataset: Path, output: Path) -> None:  # noqa: C901
             )
             if not paths:
                 raise ValueError(f"No images in {directory / label}")
+            if private := [path for path in paths if path.name.startswith(PRIVATE_PREFIX)]:
+                raise ValueError(f"Refusing to package private synthetic images, e.g. {private[0]}")
             counts[split][label] = len(paths)
             for path in paths:
                 with Image.open(path) as image:

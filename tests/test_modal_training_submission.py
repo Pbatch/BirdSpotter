@@ -49,4 +49,5 @@ def test_training_submission_saves_call_id_without_waiting(
     assert trainer.train.spawn.call_args.args[3] == 128
     assert submission["drop_path_rate"] == 0.1
     assert submission["loss_function"] == "focal"
-    assert trainer.train.spawn.call_args.args[-3:] == (0.0001, 0.1, "focal")
+    assert trainer.train.spawn.call_args.args[-4:] == (0.0001, 0.1, "focal", "")
+    assert submission["extra_dataset_tars"] == ""
