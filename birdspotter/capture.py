@@ -76,6 +76,9 @@ class Capture:
     def start(self) -> Self:
         if isinstance(self.source, str):
             os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+            # The camera's H.264 stream logs a truncated-SEI error on every frame; stream
+            # failures still surface through read() and the frame timeout.
+            os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")  # AV_LOG_FATAL
         backend = cv2.CAP_V4L2 if isinstance(self.source, int) else cv2.CAP_FFMPEG
         capture = cv2.VideoCapture(self.source, backend)
         if not capture.isOpened():
