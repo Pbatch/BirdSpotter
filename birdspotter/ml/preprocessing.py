@@ -7,7 +7,11 @@ import torch
 from torchvision.io import ImageReadMode, decode_image
 
 from birdspotter.classification import letterbox
-from birdspotter.ml.classifier import validate_image_size
+
+
+def validate_image_size(image_size: int) -> None:
+    if image_size < 32 or image_size % 32:
+        raise ValueError("Image size must be a positive multiple of 32")
 
 
 @dataclass(frozen=True, slots=True)

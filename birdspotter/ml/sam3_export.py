@@ -1,4 +1,4 @@
-"""Export fixed-prompt SAM 3 as a static 504x504 W8A16 OpenVINO model.
+"""Export fixed-prompt SAM 3 at 504x504 as a W8A16 OpenVINO model.
 
 Run with an ML environment containing torch, transformers, openvino and nncf::
 
@@ -10,9 +10,11 @@ Use ``--device cuda`` to speed up tracing on an NVIDIA GPU; the exported
 OpenVINO model has no CUDA dependency.
 
 The default prompt is ``bird``. Its text features are baked into the graph, so
-there is no tokenizer or text encoder at runtime. Input is normalized RGB FP16
-NCHW, with batch size one. Normalize values in [0, 1] with mean=std=0.5.
-SAM 3 uses 14-pixel patches. Global rotary positions are rebuilt for 504x504.
+there is no tokenizer or text encoder at runtime. Input is a raw uint8 BGR
+frame in NHWC layout with batch size one and any height and width, as OpenCV
+decodes it. The graph converts it to RGB, resizes the whole frame to 504x504
+and normalizes it with mean=std=0.5. SAM 3 uses 14-pixel patches. Global
+rotary positions are rebuilt for 504x504.
 Outputs are the highest-confidence object's mask logits (1x1x504x504), its
 normalized xyxy box (1x4), and its presence-adjusted score (1). Threshold mask
 logits at zero and reject scores below your bird-presence threshold.
@@ -36,6 +38,8 @@ import torch
 from openvino.passes import ConstantFolding, Manager
 from transformers import Sam3Model, Sam3Processor
 from transformers.modeling_outputs import BaseModelOutputWithPooling
+
+from birdspotter.sam3_openvino import embed_preprocessing
 
 INPUT_SIZE = 504
 MODEL_FILENAME = "sam3_bird.xml"
@@ -95,7 +99,7 @@ def export_sam3_openvino(
     cache_dir: Path | None = None,
     device: str = "cpu",
 ) -> Path:
-    """Export a fixed concept prompt with static input and INT8 weight compression."""
+    """Export a fixed concept prompt with embedded preprocessing and INT8 weight compression."""
     if not prompt.strip():
         raise ValueError("The concept prompt must not be empty")
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -129,13 +133,18 @@ def export_sam3_openvino(
         node.set_friendly_name(f"{index}_{node.get_friendly_name()}")
     print("Compressing weights to symmetric INT8 (W8A16)", flush=True)
     compressed = nncf.compress_weights(converted, mode=nncf.CompressWeightsMode.INT8_SYM)
+    compressed = embed_preprocessing(compressed)
     model_path = model_dir / MODEL_FILENAME
     ov.save_model(compressed, model_path, compress_to_fp16=True)
     metadata = {
         "checkpoint": checkpoint,
         "prompt": prompt,
-        "input_shape": [1, 3, INPUT_SIZE, INPUT_SIZE],
-        "input_dtype": "float16",
+        "input_shape": [1, -1, -1, 3],
+        "input_dtype": "uint8",
+        "input_layout": "NHWC",
+        "input_color": "BGR",
+        "model_input_size": INPUT_SIZE,
+        "embedded_preprocessing": True,
         "normalization": {"mean": [0.5] * 3, "std": [0.5] * 3},
         "weight_compression": "INT8_SYM",
         "activation_quantization": False,

@@ -15,3 +15,4 @@ data/
 /MEMORY.md
 segmented/
 .deploy-backups/
+.claude/settings.local.json
