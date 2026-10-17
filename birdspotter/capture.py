@@ -12,8 +12,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 import numpy as np
+from loguru import logger
 
 DECODE_INTERVAL_SECONDS = 1.0
+# Bounds how long FFmpeg blocks in grab()/read() on a stalled stream, so close() can
+# wait for the reader to leave FFmpeg before releasing it.
+STREAM_TIMEOUT_SECONDS = 5.0
 Roi = tuple[int, int, int, int]
 
 
@@ -69,6 +73,7 @@ class Capture:
         self._latest: CapturedFrame | None = None
         self._latest_source: CapturedFrame | None = None
         self._roi_revision = 0
+        self._sequence = 0
         self._error: Exception | None = None
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
@@ -79,8 +84,20 @@ class Capture:
             # The camera's H.264 stream logs a truncated-SEI error on every frame; stream
             # failures still surface through read() and the frame timeout.
             os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")  # AV_LOG_FATAL
-        backend = cv2.CAP_V4L2 if isinstance(self.source, int) else cv2.CAP_FFMPEG
-        capture = cv2.VideoCapture(self.source, backend)
+        if isinstance(self.source, int):
+            capture = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
+        else:
+            timeout_ms = int(STREAM_TIMEOUT_SECONDS * 1000)
+            capture = cv2.VideoCapture(
+                self.source,
+                cv2.CAP_FFMPEG,
+                [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                    timeout_ms,
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                    timeout_ms,
+                ],
+            )
         if not capture.isOpened():
             capture.release()
             raise RuntimeError(f"Could not open camera {self.source_name()}")
@@ -94,18 +111,21 @@ class Capture:
             capture.set(cv2.CAP_PROP_FPS, self.fps)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._capture = capture
-        self._thread = threading.Thread(target=self._reader, name="camera-reader", daemon=True)
+        self._thread = threading.Thread(
+            target=self._reader,
+            args=(capture, self._stopping),
+            name="camera-reader",
+            daemon=True,
+        )
         self._thread.start()
         return self
 
-    def _reader(self) -> None:
-        capture = self._capture
-        if capture is None:
-            raise RuntimeError("Camera has not been started")
-        sequence = 0
+    def _reader(self, capture: cv2.VideoCapture, stopping: threading.Event) -> None:
+        # The capture and stop flag are this reader's own, so a reader abandoned by
+        # reconnect() cannot pick up its replacement's state.
         next_decode = time.monotonic() + DECODE_INTERVAL_SECONDS
         try:
-            while not self._stopping.is_set():
+            while not stopping.is_set():
                 if time.monotonic() < next_decode:
                     if not capture.grab():
                         raise RuntimeError("Camera stopped returning frames")
@@ -116,9 +136,12 @@ class Capture:
                 if not ok:
                     raise RuntimeError("Camera stopped returning frames")
                 next_decode = time.monotonic() + DECODE_INTERVAL_SECONDS
-                sequence += 1
                 captured_at = datetime.now(UTC)
                 with self._condition:
+                    # The sequence continues across reconnects so callers waiting on
+                    # newest(after_sequence=...) keep working.
+                    self._sequence += 1
+                    sequence = self._sequence
                     source_frame = CapturedFrame(sequence, captured_at, image, self._roi_revision)
                     self._latest_source = source_frame
                     self._latest = CapturedFrame(
@@ -132,6 +155,8 @@ class Capture:
                     self._condition.notify_all()
         except Exception as error:  # noqa: BLE001 -- thread boundary reports failures to caller
             with self._condition:
+                if stopping.is_set():
+                    return
                 self._error = error
                 self._condition.notify_all()
 
@@ -184,10 +209,26 @@ class Capture:
 
     def close(self) -> None:
         self._stopping.set()
-        if self._capture is not None:
-            self._capture.release()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
+        capture, thread = self._capture, self._thread
+        self._capture = self._thread = None
+        if thread is not None:
+            thread.join(timeout=STREAM_TIMEOUT_SECONDS + 1)
+            if thread.is_alive():
+                # Releasing while the reader is still inside grab()/read() frees FFmpeg
+                # state it is using and segfaults the process, so leak the handle instead.
+                logger.warning("Camera reader did not stop | leaving capture unreleased")
+                return
+        if capture is not None:
+            capture.release()
+
+    def reconnect(self) -> None:
+        """Reopen the camera after its reader stalls or fails."""
+
+        self.close()
+        with self._condition:
+            self._error = None
+        self._stopping = threading.Event()
+        self.start()
 
     def actual_settings(self) -> dict[str, float | str]:
         if self._capture is None:

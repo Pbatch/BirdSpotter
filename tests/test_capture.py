@@ -1,3 +1,4 @@
+import threading
 from datetime import UTC, datetime
 
 import numpy as np
@@ -27,11 +28,10 @@ def test_reader_grabs_until_interval_then_reads_next_frame(
 ) -> None:
     camera = Capture()
     recording_capture = RecordingCapture(camera)
-    camera._capture = recording_capture  # ty: ignore[invalid-assignment]  # noqa: SLF001
     times = iter((0.0, 0.25, 0.75, 1.0, 1.05))
     monkeypatch.setattr(capture_module.time, "monotonic", lambda: next(times))
 
-    camera._reader()  # noqa: SLF001
+    camera._reader(recording_capture, camera._stopping)  # ty: ignore[invalid-argument-type]  # noqa: SLF001
 
     assert recording_capture.events == ["grab", "grab", "read"]
     assert camera._latest is not None  # noqa: SLF001
@@ -68,3 +68,74 @@ def test_set_roi_updates_the_classifier_frame() -> None:
     assert camera._latest is not None  # noqa: SLF001
     assert camera._latest.image_bgr.shape == (5, 7, 3)  # noqa: SLF001
     assert camera._latest.roi_revision == 1  # noqa: SLF001
+
+
+class BlockedCapture:
+    """A capture whose reader thread is stuck inside FFmpeg until unblocked."""
+
+    def __init__(self) -> None:
+        self.unblock = threading.Event()
+        self.released = False
+
+    def grab(self) -> bool:
+        self.unblock.wait()
+        return False
+
+    def release(self) -> None:
+        self.released = True
+
+
+def test_close_does_not_release_a_capture_the_reader_is_still_using(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(capture_module, "STREAM_TIMEOUT_SECONDS", 0.0)
+    camera = Capture()
+    blocked = BlockedCapture()
+    camera._capture = blocked  # ty: ignore[invalid-assignment]  # noqa: SLF001
+    camera._thread = threading.Thread(  # noqa: SLF001
+        target=camera._reader,  # noqa: SLF001
+        args=(blocked, camera._stopping),  # noqa: SLF001
+        daemon=True,
+    )
+    camera._thread.start()  # noqa: SLF001
+
+    camera.close()
+
+    assert not blocked.released
+    blocked.unblock.set()
+
+
+def test_close_releases_the_capture_after_the_reader_stops() -> None:
+    camera = Capture()
+    blocked = BlockedCapture()
+    blocked.unblock.set()
+    camera._capture = blocked  # ty: ignore[invalid-assignment]  # noqa: SLF001
+    camera._thread = threading.Thread(  # noqa: SLF001
+        target=camera._reader,  # noqa: SLF001
+        args=(blocked, camera._stopping),  # noqa: SLF001
+        daemon=True,
+    )
+    camera._thread.start()  # noqa: SLF001
+
+    camera.close()
+
+    assert blocked.released
+
+
+def test_reconnect_clears_the_reader_error_and_keeps_the_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    camera = Capture()
+    camera._sequence = 7  # noqa: SLF001
+    camera._error = RuntimeError("Camera stopped returning frames")  # noqa: SLF001
+    old_stopping = camera._stopping  # noqa: SLF001
+    starts: list[threading.Event] = []
+    monkeypatch.setattr(camera, "start", lambda: starts.append(camera._stopping))  # noqa: SLF001
+
+    camera.reconnect()
+
+    assert old_stopping.is_set()
+    assert starts == [camera._stopping]  # noqa: SLF001
+    assert not camera._stopping.is_set()  # noqa: SLF001
+    assert camera._error is None  # noqa: SLF001
+    assert camera._sequence == 7  # noqa: SLF001

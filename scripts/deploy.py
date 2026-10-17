@@ -29,6 +29,7 @@ from birdspotter.types import BirdCandidate
 
 CLASSIFIER_FPS = 1.0
 WINDOW_MINUTES = 5
+CAMERA_RETRY_SECONDS = 5.0
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 
@@ -232,7 +233,7 @@ def run_classification_loop(
             time.sleep(min(0.02, next_classification - now))
             continue
 
-        frame = camera.newest(after_sequence=sequence)
+        frame = next_frame(camera, sequence)
         sequence = frame.sequence
         # Windows are aligned to the UTC clock; the first frame of a new window
         # closes the previous one, whose frames all share its directory name.
@@ -260,6 +261,23 @@ def run_classification_loop(
         # This preserves the requested cadence when inference is fast and naturally
         # skips the wait when an inference call overruns its one-second budget.
         next_classification += 1 / CLASSIFIER_FPS
+
+
+def next_frame(camera: Capture, after_sequence: int) -> CapturedFrame:
+    """Return the next camera frame, reopening the stream whenever it stalls or fails."""
+
+    while True:
+        try:
+            return camera.newest(after_sequence=after_sequence)
+        except (TimeoutError, RuntimeError) as error:
+            logger.warning("Camera stalled | {} | reconnecting", error.__cause__ or error)
+        try:
+            camera.reconnect()
+        except RuntimeError as error:
+            logger.warning(
+                "Camera reconnect failed | {} | retrying in {}s", error, CAMERA_RETRY_SECONDS
+            )
+            time.sleep(CAMERA_RETRY_SECONDS)
 
 
 def main() -> None:

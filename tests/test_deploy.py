@@ -162,6 +162,41 @@ def test_loop_saves_one_directory_per_clock_aligned_window(
     ]
 
 
+def test_next_frame_reconnects_after_a_camera_stall(monkeypatch: pytest.MonkeyPatch) -> None:
+    frame = CapturedFrame(4, datetime(2026, 10, 1, tzinfo=UTC), np.zeros((4, 6, 3), np.uint8))
+    failures = [
+        TimeoutError("Timed out waiting for a camera frame"),
+        RuntimeError("Camera reader failed"),
+    ]
+    events: list[str] = []
+
+    class Camera:
+        @staticmethod
+        def newest(*, after_sequence: int) -> CapturedFrame:
+            events.append(f"newest:{after_sequence}")
+            if failures:
+                raise failures.pop(0)
+            return frame
+
+        @staticmethod
+        def reconnect() -> None:
+            events.append("reconnect")
+            if len(failures) == 1:
+                raise RuntimeError("Could not open camera")
+
+    monkeypatch.setattr(deploy.time, "sleep", lambda _seconds: events.append("sleep"))
+
+    assert deploy.next_frame(Camera(), 3) is frame  # ty: ignore[invalid-argument-type]
+    assert events == [
+        "newest:3",
+        "reconnect",
+        "sleep",
+        "newest:3",
+        "reconnect",
+        "newest:3",
+    ]
+
+
 def test_candidate_saves_uncropped_source_frame_and_roi(tmp_path: Path) -> None:
     source = np.zeros((40, 60, 3), dtype=np.uint8)
     crop = source[12:32, 10:40].copy()
