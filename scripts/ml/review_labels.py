@@ -1,4 +1,7 @@
-"""Review classifier images in the browser: B marks bird, N marks no_bird, Z undoes."""
+"""Review classifier images in the browser: B marks bird, N marks no_bird, E excludes, Z undoes.
+
+E records an "exclude" decision for images that belong in neither class.
+"""
 
 import argparse
 import json
@@ -31,11 +34,18 @@ PAGE = """<!doctype html>
 </style>
 <header><span id="progress"></span><span id="meta"></span></header>
 <main><img id="img" alt=""></main>
-<footer><kbd>B</kbd> bird &nbsp; <kbd>N</kbd> no bird &nbsp; <kbd>Z</kbd> undo</footer>
+<footer>
+  <kbd>B</kbd> bird &nbsp; <kbd>N</kbd> no bird &nbsp; <kbd>E</kbd> exclude &nbsp; <kbd>Z</kbd> undo
+</footer>
 <div id="flash"></div>
 <script>
 let items = [], done = {}, history = [], i = 0;
 const $ = (id) => document.getElementById(id);
+const FLASHES = {
+  bird: ["BIRD", "#4ade80"],
+  no_bird: ["NO BIRD", "#f87171"],
+  exclude: ["EXCLUDE", "#60a5fa"],
+};
 
 function next() {
   while (i < items.length && done[items[i].image]) i++;
@@ -65,7 +75,7 @@ async function label(decision) {
   await fetch("/label", { method: "POST", body: JSON.stringify({ image: it.image, decision }) });
   done[it.image] = decision;
   history.push(i);
-  flash(decision === "bird" ? "BIRD" : "NO BIRD", decision === "bird" ? "#4ade80" : "#f87171");
+  flash(...FLASHES[decision]);
   next();
 }
 
@@ -84,6 +94,7 @@ document.addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
   if (k === "b") label("bird");
   else if (k === "n") label("no_bird");
+  else if (k === "e") label("exclude");
   else if (k === "z") undo();
 });
 

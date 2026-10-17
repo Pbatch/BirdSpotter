@@ -5,6 +5,7 @@ from itertools import pairwise
 from pathlib import Path
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 lightning = pytest.importorskip("lightning")
@@ -13,6 +14,7 @@ torch = pytest.importorskip("torch")
 from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 
+from birdspotter.classification import BirdClassifier
 from birdspotter.ml import classifier, classifier_training
 from birdspotter.ml.classifier import transform, validate_image_size
 from birdspotter.ml.preprocessing import BatchPreprocessor, TorchvisionFrameLoader
@@ -204,3 +206,18 @@ def test_augmentations_apply_only_when_enabled(monkeypatch: pytest.MonkeyPatch) 
     assert torch.equal(augmented, expected)
     assert not torch.equal(augmented, baseline)
     assert augmented.shape == baseline.shape
+
+
+def test_pixel_input_export_matches_runtime_normalisation() -> None:
+    pixels = np.random.default_rng(0).integers(0, 256, (1, 64, 64, 3), dtype=np.uint8)
+    runtime = BirdClassifier.__new__(BirdClassifier)
+    runtime.input_shape = (64, 64)
+    runtime.pixel_input = False
+    expected = runtime.preprocess(pixels[0])
+
+    wrapped = classifier.PixelInputClassifier(torch.nn.Identity()).eval()
+    with torch.no_grad():
+        exported = wrapped(torch.from_numpy(pixels)).numpy()
+
+    assert exported.shape == expected.shape
+    assert np.allclose(exported, expected, atol=1e-5)

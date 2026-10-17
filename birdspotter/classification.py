@@ -1,4 +1,4 @@
-"""OpenVINO MobileNetV4 frame classification for the SAM 3 gate."""
+"""MobileNetV4 frame classification for the SAM 3 gate, on OpenVINO or TensorRT."""
 
 from __future__ import annotations
 
@@ -7,50 +7,9 @@ from typing import Any
 
 import cv2
 import numpy as np
-import openvino as ov
 
+from birdspotter.classifier_backends import classifier_backend
 from birdspotter.types import Classification
-
-
-class OpenVinoClassifierBackend:
-    def __init__(
-        self,
-        model_path: Path,
-        *,
-        device: str = "CPU",
-        performance_hint: str = "LATENCY",
-    ) -> None:
-        model_files = sorted(model_path.glob("*.xml"))
-        if len(model_files) != 1:
-            raise FileNotFoundError(f"Expected one OpenVINO XML model in {model_path}")
-        core = ov.Core()
-        cache_dir = Path(__file__).resolve().parents[1] / ".cache" / "openvino" / model_path.name
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        core.set_property({"CACHE_DIR": str(cache_dir)})
-        model = core.read_model(model_files[0])
-        model_input = model.input(0)
-        if not model_input.partial_shape.is_static:
-            raise TypeError("Classifier must have a fixed input shape")
-        self.input_shape = tuple(model_input.shape)
-        self.compiled_model = core.compile_model(
-            model,
-            device,
-            {"PERFORMANCE_HINT": performance_hint},
-        )
-        self.output = self.compiled_model.output(0)
-        self.device = device
-        self.performance_hint = performance_hint
-
-    def run(self, tensor: np.ndarray) -> np.ndarray:
-        return np.asarray(self.compiled_model([tensor])[self.output])
-
-    def describe(self) -> dict[str, object]:
-        return {
-            "backend": "OpenVINO",
-            "precision": "FP16 weights / FP32 inference",
-            "device": self.device,
-            "performance_hint": self.performance_hint,
-        }
 
 
 def letterbox(
@@ -77,7 +36,7 @@ def letterbox(
 
 
 class BirdClassifier:
-    """Classify whole frames with a binary MobileNetV4 OpenVINO model."""
+    """Classify whole frames with a binary MobileNetV4 OpenVINO or TensorRT model."""
 
     def __init__(
         self,
@@ -88,24 +47,30 @@ class BirdClassifier:
         if not model_path.is_dir():
             raise FileNotFoundError(
                 f"Classifier model not found: {model_path}. "
-                "Install the OpenVINO export produced by Modal training."
+                "Install the OpenVINO or TensorRT export produced from Modal training."
             )
         if not 0 <= confidence <= 1:
             raise ValueError("Classifier confidence must be between 0 and 1")
 
         self.model_path = model_path
         self.confidence = confidence
-        self.backend = OpenVinoClassifierBackend(model_path)
-        model_height, model_width = self.backend.input_shape[-2:]
+        self.backend = classifier_backend(model_path)
+        # Pixel-input exports take letterboxed uint8 BGR (1xHxWx3) and normalise in-graph;
+        # older exports take a normalised float NCHW tensor.
+        self.pixel_input = self.backend.input_dtype == np.uint8
+        shape = self.backend.input_shape
+        model_height, model_width = shape[1:3] if self.pixel_input else shape[-2:]
         if not isinstance(model_height, int) or not isinstance(model_width, int):
             raise TypeError("Classifier must have a fixed input shape")
         self.input_shape = (model_height, model_width)
 
     def preprocess(self, image_bgr: np.ndarray) -> np.ndarray:
-        """Preserve the full frame and apply the training normalization."""
+        """Letterbox the full frame, normalising here unless the model does it in-graph."""
         if image_bgr.ndim != 3 or image_bgr.shape[2] != 3 or not image_bgr.size:
             raise TypeError("Classifier input must be a nonempty HxWx3 BGR image")
         prepared, _, _ = letterbox(image_bgr, self.input_shape)
+        if self.pixel_input:
+            return prepared[None]
         rgb = prepared[:, :, ::-1].astype(np.float32) / 255.0
         rgb = (rgb - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array(
             [0.229, 0.224, 0.225], dtype=np.float32
