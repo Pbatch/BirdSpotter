@@ -1,7 +1,6 @@
 """Class-based orchestration for classifier training, logging and export."""
 
 import os
-import tarfile
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,7 +11,6 @@ import torch
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
-from torchvision.datasets import ImageFolder
 
 from birdspotter.ml.classifier import (
     MODEL_NAME,
@@ -20,14 +18,18 @@ from birdspotter.ml.classifier import (
     export_classifier,
     validate_image_size,
 )
-from birdspotter.ml.classifier_training import BirdClassifierModule, bird_target
-from birdspotter.ml.preprocessing import TRAIN_AUGMENTATION, TorchvisionFrameLoader
+from birdspotter.ml.classifier_training import BirdClassifierModule
+from birdspotter.ml.preprocessing import (
+    TRAIN_AUGMENTATION,
+    StagedFrames,
+    stage_frames,
+)
 from birdspotter.ml.training_logging import create_wandb_logger
 
 
 @dataclass(frozen=True, slots=True)
 class TrainingConfig:
-    dataset_tar: str
+    dataset: str
     run_name: str
     epochs: int
     batch_size: int
@@ -37,7 +39,7 @@ class TrainingConfig:
     wandb_project: str = "birdspotter-mobilenetv4"
     wandb_entity: str = ""
     model_variant: str = "small"
-    learning_rate: float = 0.0001
+    learning_rate: float = 0.0002
     drop_path_rate: float = 0.1
     loss_function: str = "bce"
 
@@ -81,13 +83,21 @@ class ClassifierTrainingJob:
     root: Path
     commit: Callable[[], None]
 
-    def extract_dataset(self, data: Path) -> None:
-        """Extract the dataset tar into an ImageFolder tree."""
-        with tarfile.open(self.root / self.config.dataset_tar.lstrip("/")) as source:
-            source.extractall(data, filter="data")
+    def stage_dataset(self, data: Path) -> dict[str, StagedFrames]:
+        """Stage the dataset Parquet into memory-mappable train and val splits."""
+        staged = stage_frames(self.root / self.config.dataset.lstrip("/"), data)
+        if set(staged) != {"train", "val"}:
+            raise ValueError(f"Dataset splits must be train and val, got {sorted(staged)}")
+        datasets = {
+            split: StagedFrames(path, self.config.image_size) for split, path in staged.items()
+        }
+        for split, dataset in datasets.items():
+            if set(dataset.targets.unique().tolist()) != {0, 1}:
+                raise ValueError(f"The {split} split must contain bird and no_bird images")
+        return datasets
 
     def run(self) -> None:
-        dataset_tar = self.config.dataset_tar
+        dataset = self.config.dataset
         run_name = self.config.run_name
         epochs = self.config.epochs
         batch_size = self.config.batch_size
@@ -119,30 +129,18 @@ class ClassifierTrainingJob:
         lightning.seed_everything(42, workers=True)
 
         with tempfile.TemporaryDirectory() as temporary:
-            data = Path(temporary)
-            self.extract_dataset(data)
-            datasets = {
-                split: ImageFolder(
-                    data / split,
-                    loader=TorchvisionFrameLoader(image_size, augment=split == "train"),
-                    target_transform=bird_target,
-                )
-                for split in ("train", "val")
-            }
-            for dataset in datasets.values():
-                if dataset.class_to_idx != {"bird": 0, "no_bird": 1}:
-                    raise ValueError("Each split must contain bird/ and no_bird/ directories")
+            datasets = self.stage_dataset(Path(temporary))
             loaders = {
                 split: DataLoader(
-                    dataset,
+                    frames,
                     batch_size=batch_size,
                     shuffle=split == "train",
-                    # Matches the Modal container's 8 CPUs; Albumentations runs in these workers.
+                    # Workers decode JPEGs on the CPU; augmentation runs on the GPU.
                     num_workers=8,
                     pin_memory=True,
                     persistent_workers=True,
                 )
-                for split, dataset in datasets.items()
+                for split, frames in datasets.items()
             }
             callback = VolumeCheckpoint(output, self.commit)
             wandb_logger = create_wandb_logger(
@@ -171,7 +169,7 @@ class ClassifierTrainingJob:
             with wandb_logger.experiment:
                 wandb_logger.log_hyperparams(
                     {
-                        "dataset_tar": dataset_tar,
+                        "dataset": dataset,
                         "batch_size": batch_size,
                         "epochs": epochs,
                         "precision": precision,
@@ -185,7 +183,7 @@ class ClassifierTrainingJob:
                         "focal_alpha": -1 if self.config.loss_function == "focal" else None,
                         "channels_last": True,
                         "cudnn_benchmark": True,
-                        "preprocessing": "torchvision_decode_albumentations_uint8",
+                        "preprocessing": "cpu_decode_gpu_augmentation_uint8",
                         "augmentation": TRAIN_AUGMENTATION.to_dict(),
                     }
                 )

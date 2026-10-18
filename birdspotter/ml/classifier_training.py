@@ -19,12 +19,7 @@ from birdspotter.ml.classifier import (
     MODEL_VARIANTS,
     validate_image_size,
 )
-from birdspotter.ml.preprocessing import BatchPreprocessor
-
-
-def bird_target(folder_target: int) -> int:
-    """ImageFolder sorts bird first; training uses bird=1 and no_bird=0."""
-    return 1 - folder_target
+from birdspotter.ml.preprocessing import BatchAugmentation, BatchPreprocessor
 
 
 @dataclass
@@ -73,6 +68,7 @@ class BirdClassifierModule(lightning.LightningModule):
         self.model.to(memory_format=torch.channels_last)  # ty: ignore[no-matching-overload]
         self.learning_rate = learning_rate
         self.preprocessor = BatchPreprocessor()
+        self.augmentation = BatchAugmentation()
         self.criterion = torch.nn.BCEWithLogitsLoss()
         # Targets and predictions are binary by construction; skip checks that synchronize CUDA.
         metrics = MetricCollection(
@@ -96,6 +92,8 @@ class BirdClassifierModule(lightning.LightningModule):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         frames, targets = batch
         if frames.dtype == torch.uint8:
+            if self.training:
+                frames = self.augmentation(frames)
             frames = self.preprocessor(frames)
         return frames, targets
 

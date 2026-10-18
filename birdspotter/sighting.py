@@ -1,4 +1,8 @@
-"""On-disk sightings: one folder per five-minute window with its frame, bird mask and label."""
+"""On-disk sightings: one folder per five-minute window with its frame, bird mask and label.
+
+Each segmented bird is also saved as a transparent PNG cutout in ``<output_dir>/birds/``,
+a plain image folder that displays such as the Pixoo64 gallery can watch.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ WINDOW_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$")
 FRAME_FILENAME = "full_frame.jpg"
 MASK_FILENAME = "mask.png"
 LABEL_FILENAME = "label.json"
+CUTOUTS_DIRNAME = "birds"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,8 +153,9 @@ def write_window(  # noqa: PLR0913
     """Atomically write one selection window's frame, optional mask, and label.
 
     ``source_bgr`` is the uncropped camera frame and ``crop_mask`` is SAM's mask
-    over the ROI crop. The mask is saved cropped to the bird's bbox. The label is
-    written last so its presence marks a complete window.
+    over the ROI crop. The mask is saved cropped to the bird's bbox, and the bird is
+    also cut out as an RGBA PNG named after the window in the output's ``birds/``
+    folder. The label is written last so its presence marks a complete window.
     """
 
     height, width = source_bgr.shape[:2]
@@ -162,11 +168,12 @@ def write_window(  # noqa: PLR0913
     if crop_mask is not None:
         x1, y1, x2, y2 = mask_bounds(crop_mask)
         bbox = (left + x1, top + y1, left + x2, top + y2)
-        _write_encoded(
-            window_dir / MASK_FILENAME,
-            np.where(crop_mask[y1:y2, x1:x2], 255, 0).astype(np.uint8),
-            [],
-        )
+        alpha = np.where(crop_mask[y1:y2, x1:x2], 255, 0).astype(np.uint8)
+        _write_encoded(window_dir / MASK_FILENAME, alpha, [])
+        cutouts = window_dir.parent / CUTOUTS_DIRNAME
+        cutouts.mkdir(exist_ok=True)
+        bird = source_bgr[top + y1 : top + y2, left + x1 : left + x2]
+        _write_encoded(cutouts / f"{window_dir.name}.png", np.dstack([bird, alpha]), [])
     sighting = Sighting(
         path=window_dir,
         width=width,

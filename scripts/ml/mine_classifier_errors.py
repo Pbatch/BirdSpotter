@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Find images where the classifier and SAM 3 disagree, and queue them for review_labels.py.
 
-Scores every image in <images-dir>/meta.jsonl with the classifier and the fixed-prompt
-SAM 3 TensorRT engine. SAM's bird mask is saved as a translucent overlay (masks/*.png)
-when its score reaches --mask-threshold, so the reviewer sees what SAM found. The
-queue holds every image, strongest disagreement |p_classifier - p_sam| first.
+Scores every image in <images-dir>/meta.jsonl with the classifier, then runs the
+fixed-prompt SAM 3 TensorRT engine only where the classifier scores at least --sam-above.
+SAM's bird mask is saved as a translucent overlay (masks/*.png) when its score reaches
+--mask-threshold, so the reviewer sees what SAM found. The queue holds every image,
+strongest disagreement |p_classifier - p_sam| first; images SAM skipped have a null
+sam_score and come last.
 
     python scripts/ml/mine_classifier_errors.py data/inaturalist/negatives-uk-1000
     python scripts/ml/review_labels.py data/inaturalist/negatives-uk-1000/review_queue.jsonl \\
@@ -56,8 +58,16 @@ def main() -> None:
     parser.add_argument("--classifier", type=Path, default=CLASSIFIER)
     parser.add_argument("--sam", type=Path, default=SAM3)
     parser.add_argument("--mask-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--sam-above",
+        type=float,
+        default=0.5,
+        help="Run SAM only when the classifier scores at least this (default: %(default)s)",
+    )
     parser.add_argument("--queue", type=Path, help="Default: <images-dir>/review_queue.jsonl")
     args = parser.parse_args()
+    if not 0 <= args.sam_above <= 1:
+        parser.error("--sam-above must be between 0 and 1")
 
     classifier = BirdClassifier(args.classifier)
     sam = Sam3TensorRtSegmenter(args.sam)
@@ -69,6 +79,19 @@ def main() -> None:
         if image is None:
             continue
         p_classifier = classifier.predict(image)
+        source = " · ".join(str(row[key]) for key in ("group", "taxon") if row.get(key))
+        if p_classifier < args.sam_above:
+            queue.append(
+                {
+                    "image": row["image"],
+                    "given": "classifier no bird, SAM skipped",
+                    "p_bird": round(p_classifier, 4),
+                    "sam_score": None,
+                    "source": source,
+                    "disagreement": None,
+                }
+            )
+            continue
         outputs = sam.run(sam.prepare(image))
         p_sam = float(outputs["score"].reshape(-1)[0])
         item = {
@@ -76,7 +99,7 @@ def main() -> None:
             "given": describe(p_classifier, p_sam),
             "p_bird": round(p_classifier, 4),
             "sam_score": round(p_sam, 4),
-            "source": " · ".join(str(row[key]) for key in ("group", "taxon") if row.get(key)),
+            "source": source,
             "disagreement": round(abs(p_classifier - p_sam), 4),
         }
         if p_sam >= args.mask_threshold:
@@ -85,7 +108,7 @@ def main() -> None:
             cv2.imwrite(str(args.images_dir / mask), overlay)
             item["mask"] = mask
         queue.append(item)
-    queue.sort(key=lambda item: -item["disagreement"])
+    queue.sort(key=lambda item: 1 if item["disagreement"] is None else -item["disagreement"])
     output = args.queue or args.images_dir / "review_queue.jsonl"
     with output.open("w") as handle:
         for item in queue:

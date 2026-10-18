@@ -21,7 +21,8 @@ image = (
         "opencv-python-headless==4.14.0.94",
         "openvino==2026.2.1",
         "numpy==2.4.2",
-        "albumentations==2.0.8",
+        "pyarrow==25.0.1",
+        "tqdm==4.70.0",
     )
     .add_local_python_source("birdspotter")
 )
@@ -44,7 +45,7 @@ class ModalClassifierTrainer:
     @modal.method()
     def train(  # noqa: PLR0913, PLR0917
         self,
-        dataset_tar: str,
+        dataset: str,
         run_name: str,
         epochs: int,
         batch_size: int,
@@ -54,12 +55,12 @@ class ModalClassifierTrainer:
         wandb_project: str = "birdspotter-mobilenetv4",
         wandb_entity: str = "",
         model_variant: str = "small",
-        learning_rate: float = 0.0001,
+        learning_rate: float = 0.0002,
         drop_path_rate: float = 0.1,
         loss_function: str = "bce",
     ) -> None:
         config = TrainingConfig(
-            dataset_tar,
+            dataset,
             run_name,
             epochs,
             batch_size,
@@ -78,24 +79,24 @@ class ModalClassifierTrainer:
 
 @app.local_entrypoint()
 def main(  # noqa: PLR0913, PLR0917
-    dataset_tar: str = "/datasets/classifier_birds-clean-20261006.tar.gz",
+    dataset: str = "/datasets/classifier_birds_2026_10_18_PM.parquet",
     run_name: str = "mobilenetv4-bird-640",
     epochs: int = 10,
-    batch_size: int = 128,
+    batch_size: int = 512,
     resume_checkpoint: str = "",
     precision: str = "bf16-mixed",
     image_size: int = 640,
     wandb_project: str = "birdspotter-mobilenetv4",
     wandb_entity: str = "",
     model_variant: str = "small",
-    learning_rate: float = 0.0001,
+    learning_rate: float = 0.0002,
     drop_path_rate: float = 0.1,
     loss_function: str = "bce",
 ) -> None:
     submission_dir = Path("data/modal-runs")
     submission_dir.mkdir(parents=True, exist_ok=True)
     call = ModalClassifierTrainer().train.spawn(
-        dataset_tar,
+        dataset,
         run_name,
         epochs,
         batch_size,
@@ -123,7 +124,7 @@ def main(  # noqa: PLR0913, PLR0917
         "learning_rate": learning_rate,
         "drop_path_rate": drop_path_rate,
         "loss_function": loss_function,
-        "dataset_tar": dataset_tar,
+        "dataset": dataset,
         "epochs": epochs,
         "batch_size": batch_size,
         "image_size": image_size,

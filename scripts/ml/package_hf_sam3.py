@@ -28,9 +28,13 @@ tags:
 
 # BirdSpotter SAM3 OpenVINO
 
-OpenVINO conversion of Meta's SAM 3, exported with the fixed text prompt `bird`,
-W8A16 weight compression, and a fixed 504 x 504 whole-image input size for
-BirdSpotter.
+OpenVINO conversion of Meta's SAM 3, exported with the fixed text prompt `bird`
+and W8A16 weight compression for BirdSpotter.
+
+Input: one raw BGR frame of any size, 1 x H x W x 3 (NHWC) uint8, as OpenCV
+decodes it. The graph converts it to RGB, resizes the whole frame to 504 x 504
+(ignoring aspect ratio) and normalises it to [-1, 1]. Outputs are 504 x 504
+`mask_logits`, a normalised `box` and a `score` for the most confident bird.
 
 ## Files
 
@@ -39,7 +43,7 @@ BirdSpotter.
 - `manifest.json`: SHA-256 checksums and sizes for every packaged artifact.
 
 Weights use symmetric INT8 compression with FP16 tensors; CPU execution may
-promote operations. See BirdSpotter for whole-image preprocessing and inference.
+promote operations.
 
 ## Attribution
 
@@ -69,7 +73,15 @@ def package_sam3(openvino_dir: Path, output_dir: Path) -> None:
         shutil.copy2(openvino_dir / name, packaged_models / name)
     (output_dir / "README.md").write_text(MODEL_CARD)
 
-    write_manifest(output_dir, {"model": "SAM 3", "image_size": [504, 504], "precision": "W8A16"})
+    write_manifest(
+        output_dir,
+        {
+            "model": "SAM 3",
+            "image_size": [504, 504],
+            "input": "uint8 BGR NHWC, any size, preprocessed in-graph",
+            "precision": "W8A16",
+        },
+    )
     print(f"Created Hugging Face model folder: {output_dir}")
 
 
