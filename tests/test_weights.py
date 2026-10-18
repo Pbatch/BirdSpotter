@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from birdspotter.models import sam3_openvino_dir
+from birdspotter.weights import sam3_openvino_dir
 
 
 def test_sam3_artifact_path() -> None:

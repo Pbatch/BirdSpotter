@@ -7,16 +7,14 @@ from urllib.response import addinfourl
 
 import numpy as np
 import pytest
+from starlette.testclient import TestClient
 
-from birdspotter.capture import CapturedFrame
-from birdspotter.gallery import (
-    load_roi_config,
+from birdspotter.capture import CapturedFrame, load_roi_config
+from birdspotter.sighting import recent_birds
+from birdspotter.web.gallery import (
+    create_gallery_app,
     london_timestamp,
-    recent_birds,
-    render_gallery,
-    render_sightings,
     start_gallery_server,
-    write_roi_config,
 )
 
 
@@ -50,11 +48,12 @@ def test_recent_birds_returns_only_the_ten_newest_bird_windows(tmp_path: Path) -
     (tmp_path / "unrelated").mkdir()
     (tmp_path / "roi.json").write_text("{}")
 
-    assert recent_birds(tmp_path) == list(reversed(birds[2:]))
+    assert [sighting.path for sighting in recent_birds(tmp_path, 10)] == list(reversed(birds[2:]))
 
 
 def test_templates_show_metadata_default_tab_and_empty_state(tmp_path: Path) -> None:
-    empty_page = render_gallery(tmp_path)
+    client = TestClient(create_gallery_app(tmp_path))
+    empty_page = client.get("/").content
 
     assert b"Waiting for the first bird sighting" in empty_page
     assert b'<link rel="icon" type="image/png" href="/icon.png">' in empty_page
@@ -66,7 +65,7 @@ def test_templates_show_metadata_default_tab_and_empty_state(tmp_path: Path) -> 
     assert b'http-equiv="refresh"' not in empty_page
 
     create_window(tmp_path, "2026-09-05_12-05")
-    sightings = render_sightings(tmp_path)
+    sightings = client.get("/sightings.html").content
     assert b"2026-09-05 13:05 - 82% conf" in sightings
     assert b'data-frame="/windows/2026-09-05_12-05/full_frame.jpg"' in sightings
     assert b'data-mask="/windows/2026-09-05_12-05/mask.png"' in sightings
@@ -77,16 +76,6 @@ def test_templates_show_metadata_default_tab_and_empty_state(tmp_path: Path) -> 
 
 def test_london_timestamp_omits_the_winter_timezone_label() -> None:
     assert london_timestamp("2026-12-05_12-05") == "2026-12-05 12:05"
-
-
-def test_roi_config_round_trip(tmp_path: Path) -> None:
-    path = tmp_path / "roi.json"
-
-    assert load_roi_config(path) is None
-    write_roi_config(path, (100, 200, 900, 648))
-    assert load_roi_config(path) == (100, 200, 900, 648)
-    write_roi_config(path, None)
-    assert load_roi_config(path) is None
 
 
 class FakeCamera:
@@ -106,15 +95,14 @@ class FakeCamera:
 def test_starlette_app_updates_production_roi(tmp_path: Path) -> None:
     camera = FakeCamera()
     config_path = tmp_path / "roi.json"
-    server = start_gallery_server(
+    with start_gallery_server(
         tmp_path,
         "127.0.0.1",
         0,
         camera=camera,  # ty: ignore[invalid-argument-type]
         roi_config_path=config_path,
-    )
-    base_url = f"http://127.0.0.1:{server.server_port}"
-    try:
+    ) as server:
+        base_url = f"http://127.0.0.1:{server.server_port}"
         with open_http(f"{base_url}/camera.jpg") as response:
             assert response.headers["Content-Type"] == "image/jpeg"
             assert response.read().startswith(b"\xff\xd8")
@@ -132,9 +120,6 @@ def test_starlette_app_updates_production_roi(tmp_path: Path) -> None:
                 "width": 64,
                 "height": 48,
             }
-    finally:
-        server.shutdown()
-        server.server_close()
     assert camera.roi == (4, 5, 34, 35)
     assert load_roi_config(config_path) == camera.roi
 
@@ -144,9 +129,8 @@ def test_starlette_app_serves_gallery_assets_and_protects_other_files(tmp_path: 
     icon = tmp_path / "icon.png"
     icon.write_bytes(b"icon-data")
     (tmp_path / "private.txt").write_bytes(b"secret")
-    server = start_gallery_server(tmp_path, "127.0.0.1", 0, icon_path=icon)
-    base_url = f"http://127.0.0.1:{server.server_port}"
-    try:
+    with start_gallery_server(tmp_path, "127.0.0.1", 0, icon_path=icon) as server:
+        base_url = f"http://127.0.0.1:{server.server_port}"
         with open_http(f"{base_url}/") as response:
             assert response.headers["Cache-Control"] == "no-cache"
             assert b"/windows/2026-09-05_12-10/full_frame.jpg" in response.read()
@@ -178,17 +162,12 @@ def test_starlette_app_serves_gallery_assets_and_protects_other_files(tmp_path: 
             with pytest.raises(HTTPError) as captured:
                 open_http(url)
             assert captured.value.code == 404
-    finally:
-        server.shutdown()
-        server.server_close()
 
 
 def test_uvicorn_wrapper_serves_starlette_app(tmp_path: Path) -> None:
-    server = start_gallery_server(tmp_path, "127.0.0.1", 0)
-    try:
-        with open_http(f"http://127.0.0.1:{server.server_port}/") as response:
-            assert response.status == 200
-            assert b"BirdSpotter" in response.read()
-    finally:
-        server.shutdown()
-        server.server_close()
+    with (
+        start_gallery_server(tmp_path, "127.0.0.1", 0) as server,
+        open_http(f"http://127.0.0.1:{server.server_port}/") as response,
+    ):
+        assert response.status == 200
+        assert b"BirdSpotter" in response.read()

@@ -13,6 +13,7 @@ trained-model/
 data/
 *.part
 /MEMORY.md
+/DATA.md
 segmented/
 .deploy-backups/
 .claude/settings.local.json

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Self
 from urllib.parse import urlsplit, urlunsplit
 
@@ -19,6 +21,29 @@ DECODE_INTERVAL_SECONDS = 1.0
 # wait for the reader to leave FFmpeg before releasing it.
 STREAM_TIMEOUT_SECONDS = 5.0
 Roi = tuple[int, int, int, int]
+
+
+def load_roi_config(path: Path) -> Roi | None:
+    """Load a persisted ROI, returning full-frame mode when absent."""
+
+    if not path.is_file():
+        return None
+    data = json.loads(path.read_text())
+    value = data.get("roi")
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != 4 or any(not isinstance(x, int) for x in value):
+        raise ValueError(f"Invalid ROI configuration: {path}")
+    return tuple(value)
+
+
+def write_roi_config(path: Path, roi: Roi | None) -> None:
+    """Atomically persist the production ROI."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".part")
+    temporary.write_text(json.dumps({"roi": roi}, indent=2) + "\n")
+    temporary.replace(path)
 
 
 def crop_to_roi(image: np.ndarray, roi: Roi | None) -> np.ndarray:

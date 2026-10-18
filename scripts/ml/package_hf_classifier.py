@@ -14,7 +14,7 @@ from birdspotter.ml.hf_packaging import (
     upload_package,
     write_manifest,
 )
-from birdspotter.models import classifier_path, default_weights_dir
+from birdspotter.weights import classifier_path, default_weights_dir
 
 REPOSITORY = "PBatch23888/birdspotter-mobilenetv4"
 

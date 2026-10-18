@@ -2,20 +2,23 @@
 
 from pathlib import Path
 
-import cv2
 import numpy as np
 import openvino as ov
 from openvino.preprocess import ColorFormat, PrePostProcessor, ResizeAlgorithm
 
-SAM3_IMAGE_SIZE = 504
-MODEL_FILENAME = "sam3_bird.xml"
+from birdspotter.segmentation.sam3 import (
+    MODEL_FILENAME,
+    SAM3_IMAGE_SIZE,
+    check_frame,
+    mask_from_outputs,
+)
 
 
 def embed_preprocessing(model: ov.Model) -> ov.Model:
     """Accept raw uint8 BGR frames of any size, as OpenCV decodes them.
 
-    The embedded steps match ``preprocess_image``: BGR to RGB, a whole-frame
-    resize to 504x504 that ignores aspect ratio, and normalization to [-1, 1].
+    The embedded steps are BGR to RGB, a whole-frame resize to 504x504 that
+    ignores aspect ratio, and normalization to [-1, 1].
     """
     ppp = PrePostProcessor(model)
     image = ppp.input("image")
@@ -65,20 +68,9 @@ def pin_encoder(model: ov.Model, encoder_device: str, decoder_device: str) -> ov
     return model
 
 
-def preprocess_image(image_bgr: np.ndarray) -> np.ndarray:
-    """Resize the complete image and normalize RGB pixels for legacy SAM 3 exports."""
-    if image_bgr.ndim != 3 or image_bgr.shape[2] != 3 or not image_bgr.size:
-        raise ValueError("SAM 3 expects a nonempty HxWx3 BGR image")
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    resized = cv2.resize(image_rgb, (SAM3_IMAGE_SIZE, SAM3_IMAGE_SIZE))
-    normalized = resized.astype(np.float32) / 127.5 - 1.0
-    return np.ascontiguousarray(normalized.transpose(2, 0, 1)[None], dtype=np.float16)
-
-
 def prepare_frame(image_bgr: np.ndarray) -> np.ndarray:
-    """Batch a raw BGR frame for an export with embedded preprocessing."""
-    if image_bgr.ndim != 3 or image_bgr.shape[2] != 3 or not image_bgr.size:
-        raise ValueError("SAM 3 expects a nonempty HxWx3 BGR image")
+    """Batch a raw BGR frame; the export resizes and normalizes it in-graph."""
+    check_frame(image_bgr)
     return np.ascontiguousarray(image_bgr[None], dtype=np.uint8)
 
 
@@ -109,28 +101,21 @@ class Sam3OpenVinoSegmenter:
                 pass  # e.g. a non-Intel GPU that OpenVINO lists but cannot compile for
         if self.encoder_device == "CPU":
             self.backend = core.compile_model(self.model_path, "CPU", config)
-        # Exports before preprocessing was embedded take normalized FP16 NCHW.
-        self.embedded_preprocessing = self.backend.input("image").get_element_type() == ov.Type.u8
+        if self.backend.input("image").get_element_type() != ov.Type.u8:
+            raise TypeError(
+                f"SAM 3 export {self.model_path} lacks embedded preprocessing; "
+                "re-run `python -m birdspotter.ml.sam3_export`."
+            )
 
     def prepare(self, image_bgr: np.ndarray) -> np.ndarray:
-        if self.embedded_preprocessing:
-            return prepare_frame(image_bgr)
-        return preprocess_image(image_bgr)
+        return prepare_frame(image_bgr)
 
     def segment(self, image_bgr: np.ndarray) -> tuple[np.ndarray, float]:
         """Segment the whole image; reject absent birds and empty masks."""
         result = self.backend({"image": self.prepare(image_bgr)})
         score = float(np.asarray(result[self.backend.output("score")]).reshape(-1)[0])
         logits = np.asarray(result[self.backend.output("mask_logits")]).squeeze()
-        if not np.isfinite(score) or score < self.confidence:
-            raise ValueError(f"SAM 3 found no confident bird (score={score:.3f})")
-        if logits.shape != (SAM3_IMAGE_SIZE, SAM3_IMAGE_SIZE) or not np.isfinite(logits).all():
-            raise ValueError("SAM 3 returned invalid mask logits")
-        height, width = image_bgr.shape[:2]
-        mask = cv2.resize(logits.astype(np.float32), (width, height)) > 0
-        if not mask.any():
-            raise ValueError("SAM 3 returned an empty bird mask")
-        return mask, score
+        return mask_from_outputs(score, logits, image_bgr.shape, self.confidence)
 
     def describe(self) -> dict[str, object]:
         return {
@@ -139,7 +124,6 @@ class Sam3OpenVinoSegmenter:
             "prompt": "bird",
             "encoder_device": self.encoder_device,
             "input_size": SAM3_IMAGE_SIZE,
-            "embedded_preprocessing": self.embedded_preprocessing,
             "weight_compression": "W8A16",
             "confidence": self.confidence,
             "backend": "OpenVINO",

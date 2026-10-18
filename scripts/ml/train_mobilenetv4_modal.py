@@ -21,6 +21,7 @@ image = (
         "opencv-python-headless==4.14.0.94",
         "openvino==2026.2.1",
         "numpy==2.4.2",
+        "albumentations==2.0.8",
     )
     .add_local_python_source("birdspotter")
 )
@@ -56,7 +57,6 @@ class ModalClassifierTrainer:
         learning_rate: float = 0.0001,
         drop_path_rate: float = 0.1,
         loss_function: str = "bce",
-        extra_dataset_tars: str = "",
     ) -> None:
         config = TrainingConfig(
             dataset_tar,
@@ -72,7 +72,6 @@ class ModalClassifierTrainer:
             learning_rate,
             drop_path_rate,
             loss_function,
-            extra_dataset_tars,
         )
         ClassifierTrainingJob(config, Path("/mnt/birdspotter"), volume.commit).run()
 
@@ -92,7 +91,6 @@ def main(  # noqa: PLR0913, PLR0917
     learning_rate: float = 0.0001,
     drop_path_rate: float = 0.1,
     loss_function: str = "bce",
-    extra_dataset_tars: str = "",
 ) -> None:
     submission_dir = Path("data/modal-runs")
     submission_dir.mkdir(parents=True, exist_ok=True)
@@ -110,7 +108,6 @@ def main(  # noqa: PLR0913, PLR0917
         learning_rate,
         drop_path_rate,
         loss_function,
-        extra_dataset_tars,
     )
     dashboard_url = app.get_dashboard_url()
     print(f"Submitted training run: {run_name}")
@@ -127,7 +124,6 @@ def main(  # noqa: PLR0913, PLR0917
         "drop_path_rate": drop_path_rate,
         "loss_function": loss_function,
         "dataset_tar": dataset_tar,
-        "extra_dataset_tars": extra_dataset_tars,
         "epochs": epochs,
         "batch_size": batch_size,
         "image_size": image_size,

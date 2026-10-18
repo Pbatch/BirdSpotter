@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from birdspotter import classifier_backends
-from birdspotter.classification import BirdClassifier, letterbox
+from birdspotter import classifier as classifier_module
+from birdspotter.classifier import BirdClassifier, letterbox
 
 
 def test_letterbox_preserves_frame() -> None:
@@ -23,30 +23,26 @@ def test_single_logit_gates_frame() -> None:
         logit = 0.0
 
         def run(self, tensor: np.ndarray) -> np.ndarray:
-            assert tensor.shape == (1, 3, 224, 224)
+            assert tensor.shape == (1, 224, 224, 3)
             return np.array([[self.logit]], dtype=np.float32)
 
     classifier = BirdClassifier.__new__(BirdClassifier)
     classifier.input_shape = (224, 224)
     classifier.confidence = 0.5
-    classifier.pixel_input = False
     backend = Backend()
     classifier.backend = backend  # ty: ignore[invalid-assignment]
     frame = np.zeros((100, 200, 3), dtype=np.uint8)
     assert classifier.predict(frame) == 0.5
-    result = classifier.classify(frame)
-    assert result is not None
-    assert result.confidence == 0.5
+    assert classifier.classify(frame) == 0.5
     backend.logit = -1000
     assert classifier.classify(frame) is None
     backend.logit = 1000
     assert classifier.predict(frame) == 1.0
 
 
-def test_pixel_input_models_receive_letterboxed_uint8_pixels() -> None:
+def test_classifier_receives_letterboxed_uint8_pixels() -> None:
     classifier = BirdClassifier.__new__(BirdClassifier)
     classifier.input_shape = (224, 224)
-    classifier.pixel_input = True
     frame = np.full((100, 200, 3), 7, dtype=np.uint8)
 
     tensor = classifier.preprocess(frame)
@@ -65,15 +61,15 @@ def test_backend_is_chosen_from_the_model_files(
 ) -> None:
     for name in files:
         (tmp_path / name).touch()
-    monkeypatch.setattr(classifier_backends, "OpenVinoClassifierBackend", lambda _path: "openvino")
+    monkeypatch.setattr(classifier_module, "OpenVinoClassifierBackend", lambda _path: "openvino")
     # A stand-in module, so this runs without the optional TensorRT packages installed.
     monkeypatch.setitem(
         sys.modules,
-        "birdspotter.classifier_backends.tensorrt_backend",
+        "birdspotter.classifier.tensorrt_backend",
         SimpleNamespace(TensorRtClassifierBackend=lambda _path: "tensorrt"),
     )
 
-    assert classifier_backends.classifier_backend(tmp_path) == expected
+    assert classifier_module.classifier_backend(tmp_path) == expected
 
 
 TENSORRT_MODEL = Path(
@@ -91,5 +87,4 @@ def test_tensorrt_engine_runs_a_frame() -> None:
     score = classifier.predict(np.zeros((200, 200, 3), dtype=np.uint8))
 
     assert classifier.describe()["backend"] == "TensorRT"
-    assert classifier.pixel_input
     assert 0.0 <= score <= 1.0

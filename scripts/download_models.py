@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from birdspotter.models import classifier_path, default_weights_dir, sam3_openvino_dir
+from birdspotter.weights import classifier_path, default_weights_dir, sam3_openvino_dir
 
 DEFAULT_REVISION = "main"
 CLASSIFIER_MODEL_PREFIX = "openvino/"

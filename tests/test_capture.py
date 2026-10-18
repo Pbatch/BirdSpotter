@@ -1,11 +1,18 @@
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from birdspotter import capture as capture_module
-from birdspotter.capture import Capture, CapturedFrame, crop_to_roi
+from birdspotter.capture import (
+    Capture,
+    CapturedFrame,
+    crop_to_roi,
+    load_roi_config,
+    write_roi_config,
+)
 
 
 class RecordingCapture:
@@ -139,3 +146,13 @@ def test_reconnect_clears_the_reader_error_and_keeps_the_sequence(
     assert not camera._stopping.is_set()  # noqa: SLF001
     assert camera._error is None  # noqa: SLF001
     assert camera._sequence == 7  # noqa: SLF001
+
+
+def test_roi_config_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "roi.json"
+
+    assert load_roi_config(path) is None
+    write_roi_config(path, (100, 200, 900, 648))
+    assert load_roi_config(path) == (100, 200, 900, 648)
+    write_roi_config(path, None)
+    assert load_roi_config(path) is None
