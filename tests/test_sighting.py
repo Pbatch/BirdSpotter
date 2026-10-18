@@ -50,12 +50,19 @@ def test_write_window_saves_frame_cropped_mask_and_label(tmp_path: Path) -> None
     assert saved_mask[0, 0] == 0
     assert saved_mask[2, 2] == 255
     assert not list((tmp_path / "w").glob(".*.part"))
+    cutout = cv2.imread(str(tmp_path / "birds" / "w.png"), cv2.IMREAD_UNCHANGED)
+    assert cutout is not None
+    assert cutout.shape == (14, 14, 4)
+    assert (cutout[..., :3] == 100).all()
+    assert (cutout[..., 3] == saved_mask).all()
+    assert not list((tmp_path / "birds").glob(".*.part"))
 
 
 def test_write_window_saves_uncropped_frame_with_full_frame_roi_and_bbox(
     tmp_path: Path,
 ) -> None:
     source = np.full((40, 60, 3), 100, dtype=np.uint8)
+    source[15:29, 16:30] = (10, 200, 30)  # the bird's full-frame bbox, in BGR
     crop_mask = np.zeros((20, 30), dtype=bool)
     crop_mask[5:15, 8:18] = True
 
@@ -73,6 +80,11 @@ def test_write_window_saves_uncropped_frame_with_full_frame_roi_and_bbox(
     saved_mask = cv2.imread(str(tmp_path / "w" / "mask.png"), cv2.IMREAD_UNCHANGED)
     assert saved_mask is not None
     assert saved_mask.shape == (14, 14)
+    # The cutout comes from the full frame at the bbox, not from the ROI's own origin.
+    cutout = cv2.imread(str(tmp_path / "birds" / "w.png"), cv2.IMREAD_UNCHANGED)
+    assert cutout is not None
+    assert (cutout[..., :3] == (10, 200, 30)).all()
+    assert (cutout[..., 3] == saved_mask).all()
 
 
 def test_sighting_load_round_trips_the_saved_label(tmp_path: Path) -> None:
@@ -102,3 +114,4 @@ def test_empty_sighting_uses_the_whole_frame(tmp_path: Path) -> None:
     assert Sighting.load(tmp_path / "w") == empty
     assert not empty.has_bird
     assert empty.frame_roi == (0, 0, 6, 4)
+    assert not (tmp_path / "birds").exists()

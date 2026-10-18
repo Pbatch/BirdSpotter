@@ -27,15 +27,22 @@ def package_classifier(openvino_dir: Path, output: Path, checkpoint: Path | None
     if not model.input(0).partial_shape.is_static or not model.output(0).partial_shape.is_static:
         raise ValueError("Classifier must have static input/output shapes")
     shape = tuple(model.input(0).shape)
-    if len(shape) != 4 or shape[:2] != (1, 3) or tuple(model.output(0).shape) != (1, 1):
-        raise ValueError("Expected batch-one RGB input and a single bird logit")
+    if (
+        len(shape) != 4
+        or shape[0] != 1
+        or shape[3] != 3
+        or model.input(0).element_type != ov.Type.u8
+        or tuple(model.output(0).shape) != (1, 1)
+    ):
+        raise ValueError("Expected a batch-one uint8 NHWC pixel input and a single bird logit")
+    height, width = shape[1:3]
     model_name = MODEL_NAME
     if checkpoint is not None:
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)
         if (
             state["model_name"] not in MODEL_VARIANTS.values()
             or state["classes"] != CLASSES
-            or shape[-2:] != (state["image_size"], state["image_size"])
+            or (height, width) != (state["image_size"], state["image_size"])
         ):
             raise ValueError("Checkpoint metadata does not match the OpenVINO classifier")
         model_name = state["model_name"]
@@ -46,7 +53,6 @@ def package_classifier(openvino_dir: Path, output: Path, checkpoint: Path | None
         shutil.copy2(openvino_dir / name, artifacts / name)
     if checkpoint is not None:
         shutil.copy2(checkpoint, output / "best.pt")
-    height, width = shape[-2:]
     (output / "README.md").write_text(f"""---
 library_name: openvino
 pipeline_tag: image-classification
@@ -60,9 +66,10 @@ tags:
 # BirdSpotter MobileNetV4 classifier
 
 MobileNetV4 convolutional classifier fine-tuned for whole-frame bird classification.
-Input: batch-one RGB, {height} x {width}, NCHW float32. Resize with aspect-ratio
-preserving letterboxing, padding RGB=114, divide by 255, then normalize using
-ImageNet mean [0.485, 0.456, 0.406] and std [0.229, 0.224, 0.225].
+Input: batch-one BGR pixels, 1 x {height} x {width} x 3 (NHWC) uint8, as OpenCV
+decodes them. Resize with aspect-ratio preserving letterboxing, padding 114.
+The graph converts to RGB and applies the ImageNet normalisation itself
+(mean [0.485, 0.456, 0.406], std [0.229, 0.224, 0.225]).
 Output: one raw bird logit; apply sigmoid. Bird-positive frames meet the default
 0.5 probability threshold and can be passed whole to SAM 3.
 
@@ -83,6 +90,7 @@ and licence terms when redistributing.
             "task": "image-classification",
             "classes": CLASSES,
             "image_size": [height, width],
+            "input": "uint8 BGR NHWC, letterboxed with padding 114, normalised in-graph",
             "output": "bird_logit",
             "activation": "sigmoid",
             "confidence_threshold": 0.5,

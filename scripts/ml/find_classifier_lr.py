@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import tempfile
 from pathlib import Path
 
 import lightning
@@ -11,18 +12,21 @@ import torch
 from lightning.pytorch.tuner import Tuner
 from matplotlib.figure import Figure
 from torch.utils.data import DataLoader
-from torchvision.datasets import ImageFolder
 
 from birdspotter.ml.classifier import MODEL_VARIANTS
-from birdspotter.ml.classifier_training import BirdClassifierModule, bird_target
-from birdspotter.ml.preprocessing import TorchvisionFrameLoader
+from birdspotter.ml.classifier_training import BirdClassifierModule
+from birdspotter.ml.preprocessing import StagedFrames, stage_frames
 
 mpl.use("Agg")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, default=Path("data/processed/classifier_birds"))
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=Path("dist/huggingface/birds-classification/data/classifier_birds.parquet"),
+    )
     parser.add_argument(
         "--output", type=Path, default=Path("data/benchmarks/mobilenetv4-small-lr-finder")
     )
@@ -34,13 +38,8 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     lightning.seed_everything(42, workers=True)
     torch.set_num_threads(4)
-    dataset = ImageFolder(
-        args.dataset / "train",
-        loader=TorchvisionFrameLoader(640),
-        target_transform=bird_target,
-    )
-    if dataset.class_to_idx != {"bird": 0, "no_bird": 1}:
-        raise ValueError("Expected bird/ and no_bird/ training folders")
+    staging = tempfile.TemporaryDirectory()
+    dataset = StagedFrames(stage_frames(args.dataset, Path(staging.name))["train"], 640)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,

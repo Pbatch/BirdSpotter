@@ -1,6 +1,8 @@
 # Optional ML dependencies are checked before importing the training module.
 # ruff: noqa: E402
 
+import io
+import pickle
 from itertools import pairwise
 from pathlib import Path
 from unittest.mock import Mock
@@ -8,16 +10,24 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
+pa = pytest.importorskip("pyarrow")
+pq = pytest.importorskip("pyarrow.parquet")
+
 lightning = pytest.importorskip("lightning")
 torch = pytest.importorskip("torch")
 
 from PIL import Image
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, default_collate
 
 from birdspotter.classifier import letterbox
 from birdspotter.ml import classifier, classifier_training
 from birdspotter.ml.classifier import validate_image_size
-from birdspotter.ml.preprocessing import BatchPreprocessor, TorchvisionFrameLoader
+from birdspotter.ml.preprocessing import (
+    BatchAugmentation,
+    BatchPreprocessor,
+    StagedFrames,
+    stage_frames,
+)
 from birdspotter.ml.training_job import VolumeCheckpoint
 
 
@@ -107,8 +117,6 @@ def test_lightning_checkpoint_resume_and_export(
     assert exported["image_size"] == 640
     assert set(exported["state_dict"]) == set(best.model.state_dict())
     assert best(best.preprocessor(frames)).shape == (4,)
-    assert classifier_training.bird_target(0) == 1
-    assert classifier_training.bird_target(1) == 0
 
 
 def test_reject_invalid_training_resolution() -> None:
@@ -127,41 +135,76 @@ def reference_transform(image: Image.Image, image_size: int) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(values.transpose(2, 0, 1)))
 
 
-@pytest.mark.parametrize("dimensions", [(64, 64), (96, 32)])
-def test_torchvision_decode_and_validation_normalization(
-    tmp_path: Path, dimensions: tuple[int, int]
-) -> None:
-    image = Image.new("RGB", dimensions, (70, 110, 150))
-    path = tmp_path / "frame.png"
-    image.save(path)
-    decoded = TorchvisionFrameLoader(64)(str(path))
-    assert decoded.dtype == torch.uint8
-    assert decoded.shape == (3, 64, 64)
+def test_validation_normalization_matches_reference() -> None:
+    image = Image.new("RGB", (64, 64), (70, 110, 150))
+    frames = torch.from_numpy(np.array(image)).permute(2, 0, 1).unsqueeze(0)
     preprocessor = BatchPreprocessor()
-    normalized = preprocessor(decoded.unsqueeze(0))
+    normalized = preprocessor(frames)
     torch.testing.assert_close(normalized[0], reference_transform(image, 64))
-    assert torch.equal(normalized, preprocessor(decoded.unsqueeze(0)))
+    assert torch.equal(normalized, preprocessor(frames))
     assert normalized.is_contiguous(memory_format=torch.channels_last)
     assert preprocessor.state_dict() == {}
 
 
-def test_frame_loader_augments_only_when_enabled(tmp_path: Path) -> None:
-    path = tmp_path / "frame.png"
-    pixels = np.zeros((64, 64, 3), dtype=np.uint8)
-    pixels[:, :32] = (200, 40, 40)
-    pixels[:, 32:] = (40, 40, 200)
-    Image.fromarray(pixels).save(path)
-    plain = TorchvisionFrameLoader(64)
-    assert torch.equal(plain(str(path)), torch.from_numpy(pixels).permute(2, 0, 1))
-    augmenting = TorchvisionFrameLoader(64, augment=True)
-    frames = torch.stack([augmenting(str(path)) for _ in range(64)])
+def jpeg(dimensions: tuple[int, int]) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", dimensions, (70, 110, 150)).save(buffer, "JPEG", quality=100)
+    return buffer.getvalue()
+
+
+def test_staged_frames_decode_on_cpu_and_reject_unletterboxed(tmp_path: Path) -> None:
+    rows = {
+        "split": ["train", "val", "train", "val"],
+        "target": [1, 0, 0, 1],
+        "jpeg": [jpeg((64, 64)), jpeg((64, 64)), jpeg((64, 64)), jpeg((96, 32))],
+    }
+    pq.write_table(pa.table(rows), tmp_path / "dataset.parquet", row_group_size=3)
+    staged = stage_frames(tmp_path / "dataset.parquet", tmp_path)
+    assert set(staged) == {"train", "val"}
+    # Loader workers receive the dataset pickled; the round trip must stay cheap and usable.
+    train = pickle.loads(pickle.dumps(StagedFrames(staged["train"], 64)))  # noqa: S301
+    assert train.targets.tolist() == [1, 0]
+    frames, targets = default_collate([train[0], train[1]])
+    assert targets.tolist() == [1, 0]
+    assert frames.dtype == torch.uint8
+    assert frames.shape == (2, 3, 64, 64)
+    assert (frames.float().mean((0, 2, 3)) - torch.tensor([70.0, 110.0, 150.0])).abs().max() < 2
+    assert pickle.loads(pickle.dumps(train)).frames is None  # noqa: S301
+    with pytest.raises(ValueError, match="letterboxed to 64x64"):
+        StagedFrames(staged["val"], 64)[1]
+
+
+def test_batch_augmentation_varies_per_sample() -> None:
+    torch.manual_seed(0)
+    pixels = torch.zeros(3, 64, 64, dtype=torch.uint8)
+    pixels[:, :, :32] = torch.tensor([200, 40, 40]).view(3, 1, 1)
+    pixels[:, :, 32:] = torch.tensor([40, 40, 200]).view(3, 1, 1)
+    frames = BatchAugmentation()(pixels.expand(64, -1, -1, -1).contiguous())
     assert frames.dtype == torch.uint8
     assert frames.shape == (64, 3, 64, 64)
     left_red = frames[:, 0, :, :32].float().mean((1, 2)) > frames[:, 0, :, 32:].float().mean((1, 2))
+    assert left_red.any()
     assert (~left_red).any()
     channel_spread = frames.amax(1).int() - frames.amin(1).int()
     assert (channel_spread.amax((1, 2)) <= 1).any()
     assert frames.float().mean((1, 2, 3)).unique().numel() > 1
+
+
+def test_batch_augmentation_hue_rotation_keeps_grey_and_round_trips() -> None:
+    augmentation = BatchAugmentation()
+    frames = torch.rand(4, 3, 8, 8)
+    turns = torch.tensor([0.0, 0.1, -0.1, 1 / 3]).view(4, 1, 1, 1)
+    rotated = augmentation.rotate_hue(frames, turns)
+    torch.testing.assert_close(rotated[0], frames[0])
+    torch.testing.assert_close(rotated.mean(1), frames.mean(1))
+    torch.testing.assert_close(augmentation.rotate_hue(rotated, -turns), frames)
+    # A third of a turn maps red to green to blue.
+    red = torch.zeros(1, 3, 1, 1)
+    red[:, 0] = 1
+    torch.testing.assert_close(
+        augmentation.rotate_hue(red, torch.full((1, 1, 1, 1), 1 / 3)).flatten(),
+        torch.tensor([0.0, 1.0, 0.0]),
+    )
 
 
 def test_warmup_cosine_learning_rates_and_resume() -> None:
