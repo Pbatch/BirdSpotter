@@ -1,12 +1,35 @@
-"""Torchvision image decoding and independent per-image batched augmentation."""
+"""Image decoding with Albumentations training augmentation, and batched normalisation."""
 
+import os
 from dataclasses import dataclass
 
+# The pinned release otherwise queries PyPI for updates on import, in every loader worker.
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+
+import albumentations as A  # noqa: N812 -- the library's documented alias
 import numpy as np
 import torch
 from torchvision.io import ImageReadMode, decode_image
 
-from birdspotter.classification import letterbox
+from birdspotter.classifier import letterbox
+
+# Strong photometric jitter: greyscale mimics the camera's infrared night frames, blur a
+# fogged lens and noise low light.
+TRAIN_AUGMENTATION = A.Compose(
+    [
+        A.HorizontalFlip(p=0.5),
+        A.ColorJitter(
+            brightness=(0.5, 1.5),
+            contrast=(0.5, 1.5),
+            saturation=(0.4, 1.6),
+            hue=(-0.1, 0.1),
+            p=1.0,
+        ),
+        A.ToGray(p=0.2),
+        A.GaussianBlur(blur_limit=(5, 5), sigma_limit=(1.5, 1.5), p=0.2),
+        A.GaussNoise(std_range=(0.04, 0.04), per_channel=True, p=0.3),
+    ]
+)
 
 
 def validate_image_size(image_size: int) -> None:
@@ -17,17 +40,22 @@ def validate_image_size(image_size: int) -> None:
 @dataclass(frozen=True, slots=True)
 class TorchvisionFrameLoader:
     image_size: int
+    augment: bool = False
 
     def __post_init__(self) -> None:
         validate_image_size(self.image_size)
 
     def __call__(self, path: str) -> torch.Tensor:
         frame = decode_image(path, mode=ImageReadMode.RGB)
-        if frame.shape[-2:] == (self.image_size, self.image_size):
+        letterboxed = frame.shape[-2:] == (self.image_size, self.image_size)
+        if letterboxed and not self.augment:
             return frame
         rgb = frame.permute(1, 2, 0).numpy()
-        prepared, _, _ = letterbox(rgb, (self.image_size, self.image_size))
-        return torch.from_numpy(np.ascontiguousarray(prepared.transpose(2, 0, 1)))
+        if not letterboxed:
+            rgb, _, _ = letterbox(rgb, (self.image_size, self.image_size))
+        if self.augment:
+            rgb = TRAIN_AUGMENTATION(image=rgb)["image"]
+        return torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1)))
 
 
 class BatchPreprocessor(torch.nn.Module):
@@ -35,7 +63,6 @@ class BatchPreprocessor(torch.nn.Module):
 
     mean: torch.Tensor
     std: torch.Tensor
-    grayscale_weights: torch.Tensor
 
     def __init__(self) -> None:
         super().__init__()
@@ -45,29 +72,9 @@ class BatchPreprocessor(torch.nn.Module):
         self.register_buffer(
             "std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False
         )
-        self.register_buffer(
-            "grayscale_weights",
-            torch.tensor([0.2989, 0.587, 0.114]).view(1, 3, 1, 1),
-            persistent=False,
-        )
 
-    def forward(self, frames: torch.Tensor, *, augment: bool = False) -> torch.Tensor:
+    def forward(self, frames: torch.Tensor) -> torch.Tensor:
         if frames.dtype != torch.uint8 or frames.ndim != 4 or frames.shape[1] != 3:
             raise ValueError("Preprocessing requires uint8 RGB batches with shape Bx3xHxW")
         frames = frames.to(dtype=torch.float32, memory_format=torch.channels_last).div_(255)
-        if augment:
-            frames = self.augment(frames)
         return frames.sub_(self.mean).div_(self.std).contiguous(memory_format=torch.channels_last)
-
-    def augment(self, frames: torch.Tensor) -> torch.Tensor:
-        shape = (len(frames), 1, 1, 1)
-        flips = torch.rand(shape, device=frames.device) < 0.5
-        frames = torch.where(flips, frames.flip(-1), frames)
-        brightness = torch.empty(shape, device=frames.device).uniform_(0.9, 1.1)
-        contrast = torch.empty(shape, device=frames.device).uniform_(0.9, 1.1)
-        brightness_first = torch.rand(shape, device=frames.device) < 0.5
-        frames = frames.mul(torch.where(brightness_first, brightness, 1.0)).clamp_(0, 1)
-        grayscale = (frames * self.grayscale_weights).sum(dim=1, keepdim=True)
-        mean = grayscale.mean(dim=(2, 3), keepdim=True)
-        frames = ((frames - mean) * contrast + mean).clamp_(0, 1)
-        return frames.mul(torch.where(brightness_first, 1.0, brightness)).clamp_(0, 1)

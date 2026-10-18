@@ -1,6 +1,7 @@
 """Review classifier images in the browser: B marks bird, N marks no_bird, E excludes, Z undoes.
 
-E records an "exclude" decision for images that belong in neither class.
+E records an "exclude" decision for images that belong in neither class. Items with a
+"mask" (an RGBA overlay the same size as the image) show it on top; M toggles it.
 """
 
 import argparse
@@ -26,20 +27,24 @@ PAGE = """<!doctype html>
   #progress { font-weight: 600; }
   #meta { color: #aaa; }
   main { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
-  img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  /* Stack the photo and its mask in one cell so the overlay scales identically. */
+  #stage { display: grid; }
+  #stage img { grid-area: 1 / 1; width: 100vw; height: calc(100vh - 90px); object-fit: contain; }
+  #mask { pointer-events: none; }
   footer { padding: 10px 16px; color: #aaa; }
   kbd { background: #333; border-radius: 4px; padding: 1px 6px; color: #fff; }
   #flash { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
            font-size: 64px; font-weight: 700; opacity: 0; transition: opacity .25s; }
 </style>
 <header><span id="progress"></span><span id="meta"></span></header>
-<main><img id="img" alt=""></main>
+<main><div id="stage"><img id="img" alt=""><img id="mask" alt=""></div></main>
 <footer>
   <kbd>B</kbd> bird &nbsp; <kbd>N</kbd> no bird &nbsp; <kbd>E</kbd> exclude &nbsp; <kbd>Z</kbd> undo
+  &nbsp; <kbd>M</kbd> show/hide mask
 </footer>
 <div id="flash"></div>
 <script>
-let items = [], done = {}, history = [], i = 0;
+let items = [], done = {}, history = [], i = 0, showMask = true;
 const $ = (id) => document.getElementById(id);
 const FLASHES = {
   bird: ["BIRD", "#4ade80"],
@@ -51,16 +56,23 @@ function next() {
   while (i < items.length && done[items[i].image]) i++;
   if (i >= items.length) {
     $("img").removeAttribute("src");
+    $("mask").removeAttribute("src");
     $("progress").textContent = `All ${items.length} reviewed`;
     $("meta").textContent = "";
     return;
   }
   const it = items[i];
   $("img").src = "/image/" + encodeURIComponent(it.image);
+  if (it.mask) $("mask").src = "/image/" + encodeURIComponent(it.mask);
+  else $("mask").removeAttribute("src");
+  $("mask").style.visibility = it.mask && showMask ? "visible" : "hidden";
   $("progress").textContent = `${Object.keys(done).length} / ${items.length}`;
-  $("meta").textContent = `given: ${it.given} · p_bird ${it.p_bird} · ${it.source} · ${it.image}`;
+  const sam = it.sam_score === undefined ? "" : ` · SAM ${it.sam_score}`;
+  $("meta").textContent =
+    `given: ${it.given} · p_bird ${it.p_bird}${sam} · ${it.source} · ${it.image}`;
   const ahead = items[i + 1];
   if (ahead) new Image().src = "/image/" + encodeURIComponent(ahead.image);
+  if (ahead && ahead.mask) new Image().src = "/image/" + encodeURIComponent(ahead.mask);
 }
 
 function flash(text, colour) {
@@ -96,6 +108,10 @@ document.addEventListener("keydown", (e) => {
   else if (k === "n") label("no_bird");
   else if (k === "e") label("exclude");
   else if (k === "z") undo();
+  else if (k === "m") {
+    showMask = !showMask;
+    $("mask").style.visibility = items[i] && items[i].mask && showMask ? "visible" : "hidden";
+  }
 });
 
 fetch("/state").then((r) => r.json()).then((s) => { items = s.items; done = s.done; next(); });
@@ -120,6 +136,7 @@ def make_handler(
     items: list[dict], output: Path, image_root: Path = DATASET
 ) -> type[BaseHTTPRequestHandler]:
     allowed = {item["image"] for item in items}
+    files = allowed | {item["mask"] for item in items if item.get("mask")}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
@@ -139,7 +156,7 @@ def make_handler(
             elif path == "/state":
                 state = {"items": items, "done": load_decisions(output)}
                 self.send(json.dumps(state).encode(), "application/json")
-            elif path.startswith("/image/") and (name := unquote(path[7:])) in allowed:
+            elif path.startswith("/image/") and (name := unquote(path[7:])) in files:
                 file = image_root / name
                 self.send(file.read_bytes(), mimetypes.guess_type(file)[0] or "image/jpeg")
             else:

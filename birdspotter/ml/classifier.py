@@ -2,14 +2,10 @@
 
 from pathlib import Path
 
-import numpy as np
 import openvino as ov
 import timm
 import torch
-from PIL import Image
-from torchvision import transforms
 
-from birdspotter.classification import letterbox
 from birdspotter.ml.preprocessing import BatchPreprocessor, validate_image_size
 
 MODEL_NAME = "mobilenetv4_conv_large.e600_r384_in1k"
@@ -19,28 +15,6 @@ MODEL_VARIANTS = {
 }
 CLASSES = ["bird"]
 IMAGE_SIZE = 640
-TRAIN_AUGMENTATIONS = transforms.Compose(
-    [transforms.RandomHorizontalFlip(p=0.5), transforms.ColorJitter(brightness=0.1, contrast=0.1)]
-)
-
-
-def transform(
-    image: Image.Image,
-    *,
-    image_size: int = IMAGE_SIZE,
-    augment: bool = False,
-) -> torch.Tensor:
-    validate_image_size(image_size)
-    image = image.convert("RGB")
-    if augment:
-        image = TRAIN_AUGMENTATIONS(image)
-    rgb = np.asarray(image)
-    prepared, _, _ = letterbox(rgb, (image_size, image_size))
-    values = prepared.astype(np.float32) / 255.0
-    values = (values - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array(
-        [0.229, 0.224, 0.225], dtype=np.float32
-    )
-    return torch.from_numpy(np.ascontiguousarray(values.transpose(2, 0, 1)))
 
 
 def load_export_checkpoint(checkpoint: Path) -> tuple[torch.nn.Module, int]:

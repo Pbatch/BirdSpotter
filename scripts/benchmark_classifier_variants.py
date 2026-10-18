@@ -12,7 +12,7 @@ from time import perf_counter
 import cv2
 import numpy as np
 
-from birdspotter.classification import BirdClassifier
+from birdspotter.classifier import BirdClassifier
 
 
 def load_images(paths: list[Path]) -> list[tuple[Path, np.ndarray]]:
@@ -38,10 +38,10 @@ def benchmark_model(
 
     classifier = BirdClassifier(model_path)
     for path, image in images:
-        classification = classifier.classify(image)
+        confidence = classifier.classify(image)
         summary = "no bird"
-        if classification is not None:
-            summary = f"bird confidence={classification.confidence:.3f}"
+        if confidence is not None:
+            summary = f"bird confidence={confidence:.3f}"
         print(f"prediction model={model_path.name} image={path.name} {summary}")
 
     for index in range(warmup):

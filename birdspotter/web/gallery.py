@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import re
 import socket
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Thread
+from typing import Self
 from zoneinfo import ZoneInfo
 
 import cv2
@@ -23,7 +23,14 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
 
-from birdspotter.capture import Capture, Roi, crop_to_roi
+from birdspotter.capture import Capture, Roi, crop_to_roi, write_roi_config
+from birdspotter.sighting import (
+    FRAME_FILENAME,
+    MASK_FILENAME,
+    WINDOW_FORMAT,
+    WINDOW_NAME,
+    recent_birds,
+)
 
 DEFAULT_GALLERY_LIMIT = 10
 DEFAULT_GALLERY_HOST = "0.0.0.0"  # noqa: S104 - intended for trusted-LAN access
@@ -31,93 +38,40 @@ LONDON_TIMEZONE = ZoneInfo("Europe/London")
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
 TEMPLATE_DIR = PACKAGE_DIR / "templates"
-WINDOW_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$")
-WINDOW_FILES = {"full_frame.jpg": "image/jpeg", "mask.png": "image/png"}
+WINDOW_FILES = {FRAME_FILENAME: "image/jpeg", MASK_FILENAME: "image/png"}
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
-
-
-def load_roi_config(path: Path) -> Roi | None:
-    """Load a persisted ROI, returning full-frame mode when absent."""
-
-    if not path.is_file():
-        return None
-    data = json.loads(path.read_text())
-    value = data.get("roi")
-    if value is None:
-        return None
-    if not isinstance(value, list) or len(value) != 4 or any(not isinstance(x, int) for x in value):
-        raise ValueError(f"Invalid ROI configuration: {path}")
-    return tuple(value)
-
-
-def write_roi_config(path: Path, roi: Roi | None) -> None:
-    """Atomically persist the production ROI."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".part")
-    temporary.write_text(json.dumps({"roi": roi}, indent=2) + "\n")
-    temporary.replace(path)
 
 
 def london_timestamp(filename_timestamp: str) -> str:
     """Convert a BirdSpotter UTC filename timestamp to London local time."""
 
-    captured_at = datetime.strptime(filename_timestamp, "%Y-%m-%d_%H-%M").replace(tzinfo=UTC)
+    captured_at = datetime.strptime(filename_timestamp, WINDOW_FORMAT).replace(tzinfo=UTC)
     return captured_at.astimezone(LONDON_TIMEZONE).strftime("%Y-%m-%d %H:%M")
-
-
-def recent_birds(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> list[Path]:
-    """Return the newest window directories containing a segmented bird, newest first."""
-
-    birds = []
-    windows = sorted(
-        (
-            path
-            for path in output_dir.iterdir()
-            if path.is_dir() and WINDOW_NAME.fullmatch(path.name)
-        ),
-        key=lambda path: path.name,
-        reverse=True,
-    )
-    for window in windows:
-        label_path = window / "label.json"
-        if not window.is_dir() or not label_path.is_file() or not (window / "mask.png").is_file():
-            continue
-        if json.loads(label_path.read_text()).get("bbox") is None:
-            continue
-        birds.append(window)
-        if len(birds) == limit:
-            break
-    return birds
 
 
 def sighting_context(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> list[dict]:
     """Build template values for the latest sightings, composed in the browser."""
 
     sightings = []
-    for window in recent_birds(output_dir, limit):
-        label = json.loads((window / "label.json").read_text())
-        roi = label.get("roi") or [0, 0, label["width"], label["height"]]
+    for sighting in recent_birds(output_dir, limit):
+        bbox, confidence = sighting.bbox, sighting.confidence
+        if bbox is None or confidence is None:
+            continue
+        name = sighting.path.name
+        roi = sighting.frame_roi
         sightings.append(
             {
-                "confidence": round(label["confidence"] * 100),
-                "timestamp": london_timestamp(window.name),
-                "frame_url": f"/windows/{window.name}/full_frame.jpg",
-                "mask_url": f"/windows/{window.name}/mask.png",
+                "confidence": round(confidence * 100),
+                "timestamp": london_timestamp(name),
+                "frame_url": f"/windows/{name}/{FRAME_FILENAME}",
+                "mask_url": f"/windows/{name}/{MASK_FILENAME}",
                 "width": roi[2] - roi[0],
                 "height": roi[3] - roi[1],
-                "roi": ",".join(str(int(value)) for value in roi),
-                "bbox": ",".join(str(int(value)) for value in label["bbox"]),
+                "roi": ",".join(map(str, roi)),
+                "bbox": ",".join(map(str, bbox)),
             }
         )
     return sightings
-
-
-def render_sightings(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> bytes:
-    """Render only the replaceable recent-sightings card grid contents."""
-
-    template = templates.get_template("sightings.html")
-    return template.render(sightings=sighting_context(output_dir, limit)).encode()
 
 
 def render_manifest() -> bytes:
@@ -143,13 +97,6 @@ def render_manifest() -> bytes:
         },
         separators=(",", ":"),
     ).encode()
-
-
-def render_gallery(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> bytes:
-    """Render the complete gallery page outside a request context."""
-
-    template = templates.get_template("gallery.html")
-    return template.render(sightings=sighting_context(output_dir, limit)).encode()
 
 
 def require_camera(request: Request) -> Capture:
@@ -329,15 +276,17 @@ class BirdGalleryServer:
         if not self._thread.is_alive():
             raise RuntimeError("Gallery server stopped during startup")
 
-    def shutdown(self) -> None:
-        """Request a graceful server shutdown and wait for its thread."""
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Stop the server, wait for its thread and close the listening socket."""
 
         self._server.should_exit = True
         self._thread.join(timeout=5)
-
-    def server_close(self) -> None:
-        """Close the listening socket when it remains open."""
-
         with suppress(OSError):
             self._socket.close()
 

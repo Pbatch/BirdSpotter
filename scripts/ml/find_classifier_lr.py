@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 
 from birdspotter.ml.classifier import MODEL_VARIANTS
-from birdspotter.ml.classifier_training import BirdClassifier, bird_target
+from birdspotter.ml.classifier_training import BirdClassifierModule, bird_target
 from birdspotter.ml.preprocessing import TorchvisionFrameLoader
 
 mpl.use("Agg")
@@ -50,7 +50,7 @@ def main() -> None:
         persistent_workers=True,
         multiprocessing_context="spawn",
     )
-    model = BirdClassifier(model_name=MODEL_VARIANTS["small"], lr_schedule="constant")
+    model = BirdClassifierModule(model_name=MODEL_VARIANTS["small"], lr_schedule="constant")
     trainer = lightning.Trainer(
         accelerator="gpu",
         devices=1,

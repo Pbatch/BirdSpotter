@@ -41,7 +41,7 @@ class WarmupCosineSchedule:
         return 0.01 + 0.99 * (1 + math.cos(math.pi * progress)) / 2
 
 
-class BirdClassifier(lightning.LightningModule):
+class BirdClassifierModule(lightning.LightningModule):
     def __init__(  # noqa: PLR0913
         self,
         *,
@@ -96,7 +96,7 @@ class BirdClassifier(lightning.LightningModule):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         frames, targets = batch
         if frames.dtype == torch.uint8:
-            frames = self.preprocessor(frames, augment=self.trainer.training)
+            frames = self.preprocessor(frames)
         return frames, targets
 
     def step(self, batch: tuple[torch.Tensor, torch.Tensor], split: str) -> torch.Tensor:

@@ -20,8 +20,8 @@ from birdspotter.ml.classifier import (
     export_classifier,
     validate_image_size,
 )
-from birdspotter.ml.classifier_training import BirdClassifier, bird_target
-from birdspotter.ml.preprocessing import TorchvisionFrameLoader
+from birdspotter.ml.classifier_training import BirdClassifierModule, bird_target
+from birdspotter.ml.preprocessing import TRAIN_AUGMENTATION, TorchvisionFrameLoader
 from birdspotter.ml.training_logging import create_wandb_logger
 
 
@@ -40,8 +40,6 @@ class TrainingConfig:
     learning_rate: float = 0.0001
     drop_path_rate: float = 0.1
     loss_function: str = "bce"
-    # Comma-separated train-only tars (e.g. private synthetic data) extracted over dataset_tar.
-    extra_dataset_tars: str = ""
 
     def __post_init__(self) -> None:
         if not 0 < self.learning_rate < float("inf"):
@@ -83,12 +81,10 @@ class ClassifierTrainingJob:
     root: Path
     commit: Callable[[], None]
 
-    def extract_datasets(self, data: Path) -> None:
-        """Extract the dataset tar, then any extra train-only tars, into one ImageFolder tree."""
-        tars = [self.config.dataset_tar, *self.config.extra_dataset_tars.split(",")]
-        for tar in filter(None, (tar.strip() for tar in tars)):
-            with tarfile.open(self.root / tar.lstrip("/")) as source:
-                source.extractall(data, filter="data")
+    def extract_dataset(self, data: Path) -> None:
+        """Extract the dataset tar into an ImageFolder tree."""
+        with tarfile.open(self.root / self.config.dataset_tar.lstrip("/")) as source:
+            source.extractall(data, filter="data")
 
     def run(self) -> None:
         dataset_tar = self.config.dataset_tar
@@ -124,11 +120,11 @@ class ClassifierTrainingJob:
 
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary)
-            self.extract_datasets(data)
+            self.extract_dataset(data)
             datasets = {
                 split: ImageFolder(
                     data / split,
-                    loader=TorchvisionFrameLoader(image_size),
+                    loader=TorchvisionFrameLoader(image_size, augment=split == "train"),
                     target_transform=bird_target,
                 )
                 for split in ("train", "val")
@@ -141,7 +137,8 @@ class ClassifierTrainingJob:
                     dataset,
                     batch_size=batch_size,
                     shuffle=split == "train",
-                    num_workers=4,
+                    # Matches the Modal container's 8 CPUs; Albumentations runs in these workers.
+                    num_workers=8,
                     pin_memory=True,
                     persistent_workers=True,
                 )
@@ -175,7 +172,6 @@ class ClassifierTrainingJob:
                 wandb_logger.log_hyperparams(
                     {
                         "dataset_tar": dataset_tar,
-                        "extra_dataset_tars": self.config.extra_dataset_tars,
                         "batch_size": batch_size,
                         "epochs": epochs,
                         "precision": precision,
@@ -189,14 +185,12 @@ class ClassifierTrainingJob:
                         "focal_alpha": -1 if self.config.loss_function == "focal" else None,
                         "channels_last": True,
                         "cudnn_benchmark": True,
-                        "preprocessing": "torchvision_decode_uint8_gpu_augmentation",
-                        "horizontal_flip_probability": 0.5,
-                        "brightness_jitter": 0.1,
-                        "contrast_jitter": 0.1,
+                        "preprocessing": "torchvision_decode_albumentations_uint8",
+                        "augmentation": TRAIN_AUGMENTATION.to_dict(),
                     }
                 )
                 trainer.fit(
-                    BirdClassifier(
+                    BirdClassifierModule(
                         pretrained=checkpoint is None,
                         image_size=image_size,
                         model_name=model_name,
@@ -213,7 +207,7 @@ class ClassifierTrainingJob:
                     val_dataloaders=loaders["val"],
                     ckpt_path=str(checkpoint) if checkpoint is not None else None,
                 )
-                best = BirdClassifier.load_from_checkpoint(
+                best = BirdClassifierModule.load_from_checkpoint(
                     callback.best_model_path,
                     pretrained=False,
                     map_location="cpu",

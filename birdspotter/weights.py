@@ -7,6 +7,7 @@ from pathlib import Path
 CLASSIFIER_DIRNAME = "mobilenetv4-bird-640-openvino"
 SAM3_DIRNAME = "sam3"
 SAM3_OPENVINO_DIRNAME = "openvino-504"
+SAM3_TENSORRT_DIRNAME = "tensorrt-504"
 
 
 def project_root() -> Path:
@@ -23,3 +24,7 @@ def classifier_path(weights_dir: Path) -> Path:
 
 def sam3_openvino_dir(weights_dir: Path) -> Path:
     return weights_dir / SAM3_DIRNAME / SAM3_OPENVINO_DIRNAME
+
+
+def sam3_tensorrt_dir(weights_dir: Path) -> Path:
+    return weights_dir / SAM3_DIRNAME / SAM3_TENSORRT_DIRNAME

@@ -10,9 +10,9 @@ from time import perf_counter
 
 import cv2
 
-from birdspotter.classification import BirdClassifier
-from birdspotter.models import classifier_path, default_weights_dir, sam3_openvino_dir
-from birdspotter.sam3_openvino import Sam3OpenVinoSegmenter
+from birdspotter.classifier import BirdClassifier
+from birdspotter.segmentation.openvino_backend import Sam3OpenVinoSegmenter
+from birdspotter.weights import classifier_path, default_weights_dir, sam3_openvino_dir
 
 
 def benchmark(name: str, call: Callable[[], object], *, runs: int) -> None:
@@ -49,7 +49,7 @@ def main() -> None:
     segmenter = Sam3OpenVinoSegmenter(sam3_openvino_dir(weights_dir))
     classifier_tensor = classifier.preprocess(image)
     segmenter_tensor = segmenter.prepare(image)
-    if not classifier.classify(image):
+    if classifier.classify(image) is None:
         raise RuntimeError("Benchmark image contains no detected bird")
 
     benchmark(
@@ -62,7 +62,7 @@ def main() -> None:
     benchmark("SAM 3 application", lambda: segmenter.segment(image), runs=args.runs)
 
     def classifier_plus_sam() -> None:
-        if classifier.classify(image):
+        if classifier.classify(image) is not None:
             segmenter.segment(image)
 
     benchmark("classifier plus SAM", classifier_plus_sam, runs=max(1, args.runs // 2))

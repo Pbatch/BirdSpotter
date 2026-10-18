@@ -14,9 +14,9 @@ torch = pytest.importorskip("torch")
 from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 
-from birdspotter.classification import BirdClassifier
+from birdspotter.classifier import letterbox
 from birdspotter.ml import classifier, classifier_training
-from birdspotter.ml.classifier import transform, validate_image_size
+from birdspotter.ml.classifier import validate_image_size
 from birdspotter.ml.preprocessing import BatchPreprocessor, TorchvisionFrameLoader
 from birdspotter.ml.training_job import VolumeCheckpoint
 
@@ -27,7 +27,7 @@ def test_focal_loss_downweights_easy_predictions(monkeypatch: pytest.MonkeyPatch
         "create_model",
         lambda *_args, **_kwargs: torch.nn.Linear(1, 1),
     )
-    model = classifier_training.BirdClassifier(pretrained=False, loss_function="focal")
+    model = classifier_training.BirdClassifierModule(pretrained=False, loss_function="focal")
     logits = torch.tensor([-4.0, 0.0, 4.0], requires_grad=True)
     targets = torch.tensor([0, 1, 1])
     monkeypatch.setattr(model, "forward", lambda _frames: logits)
@@ -52,10 +52,10 @@ def test_lightning_checkpoint_resume_and_export(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_name: str
 ) -> None:
     def tiny_model(*_args: object, **_kwargs: object) -> torch.nn.Module:
-        return torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(12, 1))
+        return torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(192, 1))
 
     monkeypatch.setattr(classifier_training.timm, "create_model", tiny_model)
-    frames = torch.randint(0, 256, (4, 3, 2, 2), dtype=torch.uint8)
+    frames = torch.randint(0, 256, (4, 3, 8, 8), dtype=torch.uint8)
     targets = torch.tensor([0, 1, 0, 1])
     loader = DataLoader(TensorDataset(frames, targets), batch_size=2)
     commit = Mock()
@@ -70,7 +70,9 @@ def test_lightning_checkpoint_resume_and_export(
         num_sanity_val_steps=0,
     )
     trainer.fit(
-        classifier_training.BirdClassifier(pretrained=False, model_name=model_name), loader, loader
+        classifier_training.BirdClassifierModule(pretrained=False, model_name=model_name),
+        loader,
+        loader,
     )
     assert trainer.global_step == 2
     assert commit.call_count >= 2
@@ -80,7 +82,7 @@ def test_lightning_checkpoint_resume_and_export(
     checkpoint = torch.load(callback.last_model_path, weights_only=False)
     assert checkpoint["optimizer_states"][0]["state"]
     assert checkpoint["lr_schedulers"][0]["last_epoch"] == 2
-    resumed = classifier_training.BirdClassifier(pretrained=False, model_name=model_name)
+    resumed = classifier_training.BirdClassifierModule(pretrained=False, model_name=model_name)
     resumed_trainer = lightning.Trainer(
         accelerator="cpu",
         max_epochs=2,
@@ -94,7 +96,7 @@ def test_lightning_checkpoint_resume_and_export(
     assert resumed_trainer.global_step == 4
     assert resumed_trainer.lr_scheduler_configs[0].scheduler.last_epoch == 4
     assert resumed_trainer.optimizers[0].param_groups[0]["lr"] == pytest.approx(3e-6)
-    best = classifier_training.BirdClassifier.load_from_checkpoint(
+    best = classifier_training.BirdClassifierModule.load_from_checkpoint(
         callback.best_model_path,
         pretrained=False,
     )
@@ -109,16 +111,20 @@ def test_lightning_checkpoint_resume_and_export(
     assert classifier_training.bird_target(1) == 0
 
 
-@pytest.mark.parametrize("image_size", [224, 640])
-def test_training_transform_resolution(image_size: int) -> None:
-    image = Image.new("RGB", (800, 400), "red")
-    tensor = transform(image, image_size=image_size)
-    assert tensor.shape == (3, image_size, image_size)
-
-
 def test_reject_invalid_training_resolution() -> None:
     with pytest.raises(ValueError, match="multiple of 32"):
         validate_image_size(641)
+
+
+def reference_transform(image: Image.Image, image_size: int) -> torch.Tensor:
+    """Letterbox and ImageNet-normalise one image on the CPU, as a known-good reference."""
+
+    prepared, _, _ = letterbox(np.asarray(image.convert("RGB")), (image_size, image_size))
+    values = prepared.astype(np.float32) / 255.0
+    values = (values - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array(
+        [0.229, 0.224, 0.225], dtype=np.float32
+    )
+    return torch.from_numpy(np.ascontiguousarray(values.transpose(2, 0, 1)))
 
 
 @pytest.mark.parametrize("dimensions", [(64, 64), (96, 32)])
@@ -133,27 +139,29 @@ def test_torchvision_decode_and_validation_normalization(
     assert decoded.shape == (3, 64, 64)
     preprocessor = BatchPreprocessor()
     normalized = preprocessor(decoded.unsqueeze(0))
-    torch.testing.assert_close(normalized[0], transform(image, image_size=64))
+    torch.testing.assert_close(normalized[0], reference_transform(image, 64))
     assert torch.equal(normalized, preprocessor(decoded.unsqueeze(0)))
     assert normalized.is_contiguous(memory_format=torch.channels_last)
     assert preprocessor.state_dict() == {}
 
 
-def test_batch_augmentation_has_independent_per_image_randomness() -> None:
-    torch.manual_seed(42)
-    frames = torch.full((32, 3, 32, 64), 80, dtype=torch.uint8)
-    frames[:, :, :, 32:] = 160
-    preprocessor = BatchPreprocessor()
-    augmented = preprocessor(frames, augment=True)
-    values = (augmented * preprocessor.std + preprocessor.mean) * 255
-    left = values[:, :, :, :32].mean(dim=(1, 2, 3))
-    right = values[:, :, :, 32:].mean(dim=(1, 2, 3))
-    assert (left > right).any()
-    assert (left < right).any()
-    assert values.mean(dim=(1, 2, 3)).unique().numel() > 1
-    assert torch.isfinite(augmented).all()
-    assert values.min() >= 0
-    assert values.max() <= 255
+def test_frame_loader_augments_only_when_enabled(tmp_path: Path) -> None:
+    path = tmp_path / "frame.png"
+    pixels = np.zeros((64, 64, 3), dtype=np.uint8)
+    pixels[:, :32] = (200, 40, 40)
+    pixels[:, 32:] = (40, 40, 200)
+    Image.fromarray(pixels).save(path)
+    plain = TorchvisionFrameLoader(64)
+    assert torch.equal(plain(str(path)), torch.from_numpy(pixels).permute(2, 0, 1))
+    augmenting = TorchvisionFrameLoader(64, augment=True)
+    frames = torch.stack([augmenting(str(path)) for _ in range(64)])
+    assert frames.dtype == torch.uint8
+    assert frames.shape == (64, 3, 64, 64)
+    left_red = frames[:, 0, :, :32].float().mean((1, 2)) > frames[:, 0, :, 32:].float().mean((1, 2))
+    assert (~left_red).any()
+    channel_spread = frames.amax(1).int() - frames.amin(1).int()
+    assert (channel_spread.amax((1, 2)) <= 1).any()
+    assert frames.float().mean((1, 2, 3)).unique().numel() > 1
 
 
 def test_warmup_cosine_learning_rates_and_resume() -> None:
@@ -188,32 +196,12 @@ def test_warmup_cosine_learning_rates_and_resume() -> None:
         assert resumed_optimizer.param_groups[0]["lr"] == pytest.approx(expected)
 
 
-def test_augmentations_apply_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    image = Image.new("RGB", (64, 32), "red")
-    image.paste("blue", (32, 0, 64, 32))
-    calls = []
-
-    def flip_and_adjust(frame: Image.Image) -> Image.Image:
-        calls.append(frame)
-        return frame.transpose(Image.Transpose.FLIP_LEFT_RIGHT).point(lambda value: value * 0.9)
-
-    monkeypatch.setattr(classifier, "TRAIN_AUGMENTATIONS", flip_and_adjust)
-    baseline = transform(image, image_size=64)
-    assert calls == []
-    assert torch.equal(baseline, transform(image, image_size=64))
-    augmented = transform(image, image_size=64, augment=True)
-    expected = transform(flip_and_adjust(image), image_size=64)
-    assert torch.equal(augmented, expected)
-    assert not torch.equal(augmented, baseline)
-    assert augmented.shape == baseline.shape
-
-
 def test_pixel_input_export_matches_runtime_normalisation() -> None:
     pixels = np.random.default_rng(0).integers(0, 256, (1, 64, 64, 3), dtype=np.uint8)
-    runtime = BirdClassifier.__new__(BirdClassifier)
-    runtime.input_shape = (64, 64)
-    runtime.pixel_input = False
-    expected = runtime.preprocess(pixels[0])
+    rgb = pixels[..., ::-1].astype(np.float32) / 255
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    expected = ((rgb - mean) / std).transpose(0, 3, 1, 2)
 
     wrapped = classifier.PixelInputClassifier(torch.nn.Identity()).eval()
     with torch.no_grad():
