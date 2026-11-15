@@ -32,6 +32,8 @@ class Sighting:
     """One saved selection window, as described by its ``label.json``.
 
     The ROI and bbox are in full-frame pixels. A null bbox means no bird was segmented.
+    ``motion`` is the frame's grey-level difference from the background median; labels
+    written by earlier pipelines have none.
     """
 
     path: Path
@@ -39,7 +41,7 @@ class Sighting:
     height: int
     roi: Roi | None
     bbox: Roi | None
-    confidence: float | None
+    motion: float | None
     sam_confidence: float | None
 
     @property
@@ -48,7 +50,7 @@ class Sighting:
 
     @property
     def frame_roi(self) -> Roi:
-        """Return the ROI, or the whole frame when the window was classified uncropped."""
+        """Return the ROI, or the whole frame when the window was processed uncropped."""
 
         return self.roi if self.roi is not None else (0, 0, self.width, self.height)
 
@@ -61,7 +63,7 @@ class Sighting:
             height=label["height"],
             roi=_box(label["roi"]),
             bbox=_box(label["bbox"]),
-            confidence=label["confidence"],
+            motion=label.get("motion"),
             sam_confidence=label["sam_confidence"],
         )
 
@@ -73,7 +75,7 @@ class Sighting:
             "height": self.height,
             "roi": list(self.roi) if self.roi is not None else None,
             "bbox": list(self.bbox) if self.bbox is not None else None,
-            "confidence": self.confidence,
+            "motion": self.motion,
             "sam_confidence": self.sam_confidence,
         }
         label_path = self.path / LABEL_FILENAME
@@ -147,7 +149,7 @@ def write_window(  # noqa: PLR0913
     roi: Roi | None,
     crop_mask: np.ndarray | None,
     *,
-    confidence: float | None,
+    motion: float | None,
     sam_confidence: float | None,
 ) -> Sighting:
     """Atomically write one selection window's frame, optional mask, and label.
@@ -180,7 +182,7 @@ def write_window(  # noqa: PLR0913
         height=height,
         roi=roi,
         bbox=bbox,
-        confidence=confidence,
+        motion=motion,
         sam_confidence=sam_confidence,
     )
     sighting.save_label()

@@ -1,4 +1,4 @@
-"""Continuously save the highest-confidence bird from each five-minute window."""
+"""Continuously save the bird from each five-minute window's most-changed frame."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import NoReturn
 from loguru import logger
 
 from birdspotter.capture import Capture, CapturedFrame, load_roi_config, write_roi_config
-from birdspotter.classifier import BirdClassifier
+from birdspotter.motion import MotionGate
 from birdspotter.segmentation import Segmenter, sam3_segmenter
 from birdspotter.sighting import (
     WINDOW_MINUTES,
@@ -24,13 +24,13 @@ from birdspotter.sighting import (
     write_window,
 )
 from birdspotter.web.gallery import DEFAULT_GALLERY_HOST, start_gallery_server
-from birdspotter.weights import classifier_path, default_weights_dir, sam3_openvino_dir
+from birdspotter.weights import default_weights_dir, sam3_openvino_dir
 
-CLASSIFIER_FPS = 1.0
+GATE_FPS = 1.0
 CAMERA_RETRY_SECONDS = 5.0
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
-# The highest-confidence classifier-positive frame in the current window.
+# The highest-scoring frame over the threshold in the current window, and its motion score.
 Winner = tuple[CapturedFrame, float]
 
 
@@ -48,7 +48,7 @@ def configure_logging(log_level: str) -> None:
 
 def save_bird_window(
     frame: CapturedFrame,
-    confidence: float,
+    motion: float,
     segmenter: Segmenter,
     output_dir: Path,
 ) -> Sighting:
@@ -68,14 +68,14 @@ def save_bird_window(
         frame.uncropped_bgr,
         frame.roi,
         mask,
-        confidence=confidence,
+        motion=motion,
         sam_confidence=sam_score,
     )
     logger.info(
-        "Saved window | frame={} confidence={:.3f} sam_score={} "
+        "Saved window | frame={} motion={:.1f} sam_score={} "
         "segmentation_seconds={:.3f} bird={} path={}",
         frame.sequence,
-        confidence,
+        motion,
         sam_score,
         time.perf_counter() - started,
         mask is not None,
@@ -92,7 +92,7 @@ def save_empty_window(frame: CapturedFrame, output_dir: Path) -> Sighting:
         frame.uncropped_bgr,
         frame.roi,
         None,
-        confidence=None,
+        motion=None,
         sam_confidence=None,
     )
     logger.info("Saved window without bird | path={}", saved.path)
@@ -119,7 +119,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         nargs=4,
         type=int,
         metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"),
-        help="Crop every decoded camera frame to this pixel ROI before classification",
+        help="Crop every decoded camera frame to this pixel ROI before the motion gate",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("segmented"))
     parser.add_argument(
@@ -127,6 +127,21 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=sam3_openvino_dir(default_weights_dir()),
         help="SAM 3 export directory; one holding a TensorRT engine runs on TensorRT",
+    )
+    parser.add_argument(
+        "--motion-threshold",
+        type=float,
+        default=70.0,
+        help="Grey-level difference from the background median that sends a frame to SAM 3 "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--background",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help="Seconds of past frames in the background median; gating starts once they are "
+        "collected after start-up or an ROI change (default: %(default)s)",
     )
     parser.add_argument(
         "--web-host", default=DEFAULT_GALLERY_HOST, help="Gallery server bind address"
@@ -143,57 +158,49 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def update_window_winner(
-    classifier: BirdClassifier,
+    gate: MotionGate,
     frame: CapturedFrame,
     current: Winner | None,
 ) -> Winner | None:
     """Return the current window winner after inspecting one camera frame."""
 
     started = time.perf_counter()
-    confidence = classifier.classify(frame.image_bgr)
-    classifier_seconds = time.perf_counter() - started
-    if confidence is None:
-        logger.debug(
-            "Classifier | frame={} seconds={:.3f} bird_present=False",
-            frame.sequence,
-            classifier_seconds,
-        )
-        return current
+    motion = gate.score(frame.image_bgr)
+    gate_seconds = time.perf_counter() - started
+    moved = motion >= gate.threshold
     logger.debug(
-        "Classifier | frame={} seconds={:.3f} bird_present=True confidence={:.3f}",
+        "Motion | frame={} seconds={:.3f} motion={:.1f} moved={} ready={}",
         frame.sequence,
-        classifier_seconds,
-        confidence,
+        gate_seconds,
+        motion,
+        moved,
+        gate.ready,
     )
-    if current is not None and confidence <= current[1]:
-        logger.debug(
-            "Retained window winner | frame={} confidence={:.3f} candidate_confidence={:.3f}",
-            current[0].sequence,
-            current[1],
-            confidence,
-        )
+    if not moved:
         return current
-    logger.info("Window best | frame={} confidence={:.3f}", frame.sequence, confidence)
-    return frame, confidence
+    if current is not None and motion <= current[1]:
+        return current
+    logger.info("Window best | frame={} motion={:.1f}", frame.sequence, motion)
+    return frame, motion
 
 
-def run_classification_loop(
+def run_detection_loop(
     camera: Capture,
-    classifier: BirdClassifier,
+    gate: MotionGate,
     segmenter: Segmenter,
     output_dir: Path,
 ) -> NoReturn:
-    """Run classifier windows forever, saving each completed window."""
+    """Run motion-gated windows forever, saving each completed window."""
 
-    next_classification = time.monotonic()
+    next_check = time.monotonic()
     sequence = 0
     best: Winner | None = None
     latest: CapturedFrame | None = None
     roi_revision = 0
     while True:
         now = time.monotonic()
-        if now < next_classification:
-            time.sleep(min(0.02, next_classification - now))
+        if now < next_check:
+            time.sleep(min(0.02, next_check - now))
             continue
 
         frame = next_frame(camera, sequence)
@@ -204,27 +211,28 @@ def run_classification_loop(
             latest.captured_at
         ):
             if best is None:
-                logger.info("Selection window complete | no bird passed the confidence threshold")
+                logger.info("Selection window complete | no frame passed the motion threshold")
                 save_empty_window(latest, output_dir)
             else:
-                best_frame, best_confidence = best
+                best_frame, best_motion = best
                 logger.info(
-                    "Selection window complete | winner_frame={} winner_confidence={:.3f}",
+                    "Selection window complete | winner_frame={} winner_motion={:.1f}",
                     best_frame.sequence,
-                    best_confidence,
+                    best_motion,
                 )
-                save_bird_window(best_frame, best_confidence, segmenter, output_dir)
+                save_bird_window(best_frame, best_motion, segmenter, output_dir)
             best = None
         latest = frame
         if frame.roi_revision != roi_revision:
-            logger.info("Classification ROI changed | discarding current window candidate")
+            logger.info("ROI changed | discarding window candidate and background")
             best = None
+            gate.reset()
             roi_revision = frame.roi_revision
-        best = update_window_winner(classifier, frame, best)
+        best = update_window_winner(gate, frame, best)
         # Advance from the prior target time rather than from inference completion.
         # This preserves the requested cadence when inference is fast and naturally
         # skips the wait when an inference call overruns its one-second budget.
-        next_classification += 1 / CLASSIFIER_FPS
+        next_check += 1 / GATE_FPS
 
 
 def next_frame(camera: Capture, after_sequence: int) -> CapturedFrame:
@@ -249,8 +257,10 @@ def main() -> None:
 
     args = parse_arguments()
     configure_logging(args.log_level)
-    weights_dir = default_weights_dir()
-    classifier = BirdClassifier(classifier_path(weights_dir))
+    gate = MotionGate(
+        threshold=args.motion_threshold,
+        history_frames=max(2, round(args.background * GATE_FPS)),
+    )
     segmenter = sam3_segmenter(args.sam3_model)
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -261,17 +271,17 @@ def main() -> None:
     source = args.rtsp_url if args.rtsp_url is not None else args.device
     camera_source = Capture(source).source_name()
     logger.info(
-        "Starting BirdSpotter | source={} camera_request={}x{}@{}fps classifier_fps={} "
+        "Starting BirdSpotter | source={} camera_request={}x{}@{}fps gate_fps={} "
         "window_minutes={} output_dir={}",
         camera_source,
         args.width,
         args.height,
         args.camera_fps,
-        CLASSIFIER_FPS,
+        GATE_FPS,
         WINDOW_MINUTES,
         output_dir,
     )
-    logger.debug("Classifier configuration | {}", classifier.describe())
+    logger.debug("Motion gate configuration | {}", gate.describe())
     logger.debug("Segmenter configuration | {}", segmenter.describe())
 
     with (
@@ -297,7 +307,7 @@ def main() -> None:
             gallery_server.server_port,
         )
         logger.info("Camera settings | {}", camera.actual_settings())
-        run_classification_loop(camera, classifier, segmenter, output_dir)
+        run_detection_loop(camera, gate, segmenter, output_dir)
 
 
 if __name__ == "__main__":

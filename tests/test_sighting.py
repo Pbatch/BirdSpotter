@@ -28,7 +28,7 @@ def test_write_window_saves_frame_cropped_mask_and_label(tmp_path: Path) -> None
     mask = np.zeros((20, 30), dtype=bool)
     mask[5:15, 8:18] = True
 
-    sighting = write_window(tmp_path / "w", image, None, mask, confidence=0.8, sam_confidence=0.7)
+    sighting = write_window(tmp_path / "w", image, None, mask, motion=0.8, sam_confidence=0.7)
 
     assert sighting.bbox == (6, 3, 20, 17)
     label_path = tmp_path / "w" / "label.json"
@@ -38,7 +38,7 @@ def test_write_window_saves_frame_cropped_mask_and_label(tmp_path: Path) -> None
         "height": 20,
         "roi": None,
         "bbox": [6, 3, 20, 17],
-        "confidence": 0.8,
+        "motion": 0.8,
         "sam_confidence": 0.7,
     }
     frame = cv2.imread(str(tmp_path / "w" / "full_frame.jpg"))
@@ -67,7 +67,7 @@ def test_write_window_saves_uncropped_frame_with_full_frame_roi_and_bbox(
     crop_mask[5:15, 8:18] = True
 
     sighting = write_window(
-        tmp_path / "w", source, (10, 12, 40, 32), crop_mask, confidence=0.8, sam_confidence=0.7
+        tmp_path / "w", source, (10, 12, 40, 32), crop_mask, motion=0.8, sam_confidence=0.7
     )
 
     label = json.loads((sighting.path / "label.json").read_text())
@@ -93,7 +93,7 @@ def test_sighting_load_round_trips_the_saved_label(tmp_path: Path) -> None:
     crop_mask[5:15, 8:18] = True
 
     saved = write_window(
-        tmp_path / "w", source, (10, 12, 40, 32), crop_mask, confidence=0.8, sam_confidence=0.7
+        tmp_path / "w", source, (10, 12, 40, 32), crop_mask, motion=0.8, sam_confidence=0.7
     )
 
     assert Sighting.load(tmp_path / "w") == saved
@@ -107,7 +107,7 @@ def test_empty_sighting_uses_the_whole_frame(tmp_path: Path) -> None:
         np.zeros((4, 6, 3), np.uint8),
         None,
         None,
-        confidence=None,
+        motion=None,
         sam_confidence=None,
     )
 

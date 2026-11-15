@@ -29,6 +29,7 @@ from birdspotter.sighting import (
     MASK_FILENAME,
     WINDOW_FORMAT,
     WINDOW_NAME,
+    Sighting,
     recent_birds,
 )
 
@@ -39,6 +40,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
 TEMPLATE_DIR = PACKAGE_DIR / "templates"
 WINDOW_FILES = {FRAME_FILENAME: "image/jpeg", MASK_FILENAME: "image/png"}
+CROP_FILENAME = "crop.jpg"
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 
@@ -54,7 +56,7 @@ def sighting_context(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> li
 
     sightings = []
     for sighting in recent_birds(output_dir, limit):
-        bbox, confidence = sighting.bbox, sighting.confidence
+        bbox, confidence = sighting.bbox, sighting.sam_confidence
         if bbox is None or confidence is None:
             continue
         name = sighting.path.name
@@ -64,6 +66,7 @@ def sighting_context(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> li
                 "confidence": round(confidence * 100),
                 "timestamp": london_timestamp(name),
                 "frame_url": f"/windows/{name}/{FRAME_FILENAME}",
+                "crop_url": f"/windows/{name}/{CROP_FILENAME}",
                 "mask_url": f"/windows/{name}/{MASK_FILENAME}",
                 "width": roi[2] - roi[0],
                 "height": roi[3] - roi[1],
@@ -204,19 +207,45 @@ async def update_roi(request: Request) -> Response:
     return JSONResponse({"roi": roi})
 
 
-def window_file(request: Request) -> Response:
-    """Safely return a saved full frame or bird mask for browser-side composition."""
+def saved_window_file(request: Request, filename: str) -> Path:
+    """Return a file inside the requested saved window, or raise 404."""
 
     window = request.path_params["window"]
-    filename = request.path_params["filename"]
-    if WINDOW_NAME.fullmatch(window) is None or filename not in WINDOW_FILES:
+    if WINDOW_NAME.fullmatch(window) is None:
         raise HTTPException(404)
     directory = request.app.state.output_dir.resolve()
     path = directory / window / filename
     if path.resolve().parent.parent != directory or not path.is_file():
         raise HTTPException(404)
+    return path
+
+
+def window_crop(request: Request) -> Response:
+    """Return a saved full frame cropped to the ROI it was gated with."""
+
+    path = saved_window_file(request, FRAME_FILENAME)
+    frame = cv2.imread(str(path))
+    if frame is None:
+        raise HTTPException(404)
+    crop = crop_to_roi(frame, Sighting.load(path.parent).roi)
+    encoded, payload = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not encoded:
+        raise HTTPException(500, "Could not encode cropped frame")
+    return Response(
+        payload.tobytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+def window_file(request: Request) -> Response:
+    """Safely return a saved full frame or bird mask for browser-side composition."""
+
+    filename = request.path_params["filename"]
+    if filename not in WINDOW_FILES:
+        raise HTTPException(404)
     return FileResponse(
-        path,
+        saved_window_file(request, filename),
         media_type=WINDOW_FILES[filename],
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
@@ -239,6 +268,7 @@ def create_gallery_app(
         Route("/camera.jpg", camera_frame, name="camera"),
         Route("/roi.json", roi_state, name="roi-state"),
         Route("/roi", update_roi, methods=["POST"], name="roi-update"),
+        Route(f"/windows/{{window}}/{CROP_FILENAME}", window_crop, name="window-crop"),
         Route("/windows/{window}/{filename}", window_file, name="window-file"),
         Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
     ]

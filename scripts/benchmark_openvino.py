@@ -10,9 +10,9 @@ from time import perf_counter
 
 import cv2
 
-from birdspotter.classifier import BirdClassifier
+from birdspotter.motion import MotionGate
 from birdspotter.segmentation.openvino_backend import Sam3OpenVinoSegmenter
-from birdspotter.weights import classifier_path, default_weights_dir, sam3_openvino_dir
+from birdspotter.weights import default_weights_dir, sam3_openvino_dir
 
 
 def benchmark(name: str, call: Callable[[], object], *, runs: int) -> None:
@@ -45,27 +45,17 @@ def main() -> None:
         raise ValueError(f"Could not decode benchmark image: {args.image}")
 
     weights_dir = default_weights_dir()
-    classifier = BirdClassifier(classifier_path(weights_dir))
+    gate = MotionGate()
+    for _ in range(gate.history.maxlen or 0):
+        gate.score(image)
     segmenter = Sam3OpenVinoSegmenter(sam3_openvino_dir(weights_dir))
-    classifier_tensor = classifier.preprocess(image)
     segmenter_tensor = segmenter.prepare(image)
-    if classifier.classify(image) is None:
-        raise RuntimeError("Benchmark image contains no detected bird")
 
-    benchmark(
-        "classifier OpenVINO", lambda: classifier.backend.run(classifier_tensor), runs=args.runs
-    )
+    benchmark("motion gate", lambda: gate.score(image), runs=args.runs)
     benchmark(
         "SAM 3 OpenVINO", lambda: segmenter.backend({"image": segmenter_tensor}), runs=args.runs
     )
-    benchmark("classifier application", lambda: classifier.classify(image), runs=args.runs)
     benchmark("SAM 3 application", lambda: segmenter.segment(image), runs=args.runs)
-
-    def classifier_plus_sam() -> None:
-        if classifier.classify(image) is not None:
-            segmenter.segment(image)
-
-    benchmark("classifier plus SAM", classifier_plus_sam, runs=max(1, args.runs // 2))
 
 
 if __name__ == "__main__":

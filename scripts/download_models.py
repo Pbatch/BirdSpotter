@@ -13,10 +13,9 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from birdspotter.weights import classifier_path, default_weights_dir, sam3_openvino_dir
+from birdspotter.weights import default_weights_dir, sam3_openvino_dir
 
 DEFAULT_REVISION = "main"
-CLASSIFIER_MODEL_PREFIX = "openvino/"
 SAM3_MODEL_PREFIX = "openvino-504/"
 USER_AGENT = "BirdSpotter/0.1"
 
@@ -168,14 +167,8 @@ def main() -> None:
     """Parse command-line arguments and install the deployment models."""
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--classifier-repository", help="Published MobileNetV4 repository")
     parser.add_argument("--sam3-repository", help="Repository containing the custom SAM 3 export")
     parser.add_argument("--revision", default=DEFAULT_REVISION)
-    parser.add_argument(
-        "--classifier-destination",
-        type=Path,
-        default=classifier_path(default_weights_dir()),
-    )
     parser.add_argument(
         "--sam3-destination",
         type=Path,
@@ -183,16 +176,6 @@ def main() -> None:
     )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    if args.classifier_repository:
-        install_model(
-            args.classifier_repository,
-            args.revision,
-            args.classifier_destination.resolve(),
-            CLASSIFIER_MODEL_PREFIX,
-            force=args.force,
-        )
-    elif not list(args.classifier_destination.glob("*.xml")):
-        raise FileNotFoundError("Train/export MobileNetV4 first or pass --classifier-repository")
     if args.sam3_repository:
         install_model(
             args.sam3_repository,
