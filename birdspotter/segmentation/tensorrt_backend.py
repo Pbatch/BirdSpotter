@@ -30,7 +30,7 @@ def prepare_frame(image_bgr: np.ndarray) -> np.ndarray:
 
 
 class Sam3TensorRtSegmenter:
-    """Return the highest-confidence bird without a classifier box prompt."""
+    """Return the highest-confidence bird for the text prompt alone."""
 
     def __init__(self, model_dir: Path, *, confidence: float = 0.5) -> None:
         if not 0 <= confidence <= 1:
