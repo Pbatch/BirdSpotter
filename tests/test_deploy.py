@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from birdspotter.capture import Capture, CapturedFrame
+from birdspotter.motion import MotionGate
 from birdspotter.web.gallery import DEFAULT_GALLERY_HOST
 from scripts import deploy
 from scripts.deploy import parse_arguments
@@ -62,7 +63,7 @@ def test_save_bird_window_writes_frame_mask_and_label(tmp_path: Path) -> None:
         "height": 20,
         "roi": None,
         "bbox": [23, 3, 37, 17],
-        "confidence": 0.9,
+        "motion": 0.9,
         "sam_confidence": 0.95,
     }
 
@@ -82,7 +83,7 @@ def test_empty_sam_mask_saves_frame_and_label_without_mask(tmp_path: Path) -> No
     assert not (window / "mask.png").exists()
     label = json.loads((window / "label.json").read_text())
     assert label["bbox"] is None
-    assert label["confidence"] == 0.9
+    assert label["motion"] == 0.9
     assert label["sam_confidence"] == 0.1
 
 
@@ -98,7 +99,7 @@ def test_empty_window_saves_frame_and_null_label(tmp_path: Path) -> None:
         "height": 4,
         "roi": None,
         "bbox": None,
-        "confidence": None,
+        "motion": None,
         "sam_confidence": None,
     }
 
@@ -122,10 +123,10 @@ def test_loop_saves_one_directory_per_clock_aligned_window(
                 after_sequence + 1, times[after_sequence], np.zeros((4, 6, 3), np.uint8)
             )
 
-    monkeypatch.setattr(deploy, "CLASSIFIER_FPS", 1000)
-    monkeypatch.setattr(deploy, "update_window_winner", lambda _classifier, _frame, best: best)
+    monkeypatch.setattr(deploy, "GATE_FPS", 1000)
+    monkeypatch.setattr(deploy, "update_window_winner", lambda _gate, _frame, best: best)
     with pytest.raises(KeyboardInterrupt):
-        deploy.run_classification_loop(Camera(), None, None, tmp_path)  # ty: ignore[invalid-argument-type]
+        deploy.run_detection_loop(Camera(), None, None, tmp_path)  # ty: ignore[invalid-argument-type]
 
     assert sorted(path.name for path in tmp_path.iterdir()) == [
         "2026-10-01_12-00",
@@ -189,3 +190,24 @@ def test_bird_window_saves_uncropped_source_frame_and_roi(tmp_path: Path) -> Non
     assert (label["width"], label["height"]) == (60, 40)
     assert label["roi"] == [10, 12, 40, 32]
     assert label["bbox"] == [16, 15, 30, 29]
+
+
+def test_window_winner_is_the_most_changed_frame_once_ready() -> None:
+    gate = MotionGate(threshold=10, history_frames=2, sample_every=1)
+    scene = np.full((12, 12, 3), 100, np.uint8)
+    big_bird, small_bird = scene.copy(), scene.copy()
+    big_bird[3:9, 3:9] = 0
+    small_bird[3:9, 3:9] = 60
+    frames = [
+        CapturedFrame(index, datetime(2026, 10, 1, tzinfo=UTC), image)
+        for index, image in enumerate([scene, big_bird, scene, scene, big_bird, small_bird], 1)
+    ]
+
+    best = None
+    for frame in frames:
+        best = deploy.update_window_winner(gate, frame, best)
+
+    # The first bird arrives before the background is ready, so only the second counts.
+    assert best is not None
+    assert best[0] is frames[4]
+    assert best[1] == pytest.approx(100)

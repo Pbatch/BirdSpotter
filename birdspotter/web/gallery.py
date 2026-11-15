@@ -56,7 +56,7 @@ def sighting_context(output_dir: Path, limit: int = DEFAULT_GALLERY_LIMIT) -> li
 
     sightings = []
     for sighting in recent_birds(output_dir, limit):
-        bbox, confidence = sighting.bbox, sighting.confidence
+        bbox, confidence = sighting.bbox, sighting.sam_confidence
         if bbox is None or confidence is None:
             continue
         name = sighting.path.name
@@ -221,7 +221,7 @@ def saved_window_file(request: Request, filename: str) -> Path:
 
 
 def window_crop(request: Request) -> Response:
-    """Return a saved full frame cropped to the ROI it was classified with."""
+    """Return a saved full frame cropped to the ROI it was gated with."""
 
     path = saved_window_file(request, FRAME_FILENAME)
     frame = cv2.imread(str(path))

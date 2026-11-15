@@ -30,7 +30,7 @@ def create_window(output_dir: Path, name: str, *, bird: bool = True) -> Path:
         "height": 20,
         "roi": [2, 1, 26, 19],
         "bbox": [6, 3, 20, 17] if bird else None,
-        "confidence": 0.82 if bird else None,
+        "motion": 0.12 if bird else None,
         "sam_confidence": 0.9 if bird else None,
     }
     (window / "label.json").write_text(json.dumps(label))
@@ -67,7 +67,7 @@ def test_templates_show_metadata_default_tab_and_empty_state(tmp_path: Path) -> 
 
     create_window(tmp_path, "2026-09-05_12-05")
     sightings = client.get("/sightings.html").content
-    assert b"2026-09-05 13:05 - 82% conf" in sightings
+    assert b"2026-09-05 13:05 - 90% conf" in sightings
     assert b'data-frame="/windows/2026-09-05_12-05/full_frame.jpg"' in sightings
     assert b'data-mask="/windows/2026-09-05_12-05/mask.png"' in sightings
     assert b'data-bbox="6,3,20,17"' in sightings
