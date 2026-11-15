@@ -1,6 +1,6 @@
 {% for bird in sightings %}
 <figure class="bird-card">
-  <a href="{{ bird.frame_url }}">
+  <a href="{{ bird.crop_url }}">
     <canvas class="sighting" width="{{ bird.width }}" height="{{ bird.height }}"
             data-frame="{{ bird.frame_url }}"
             data-mask="{{ bird.mask_url }}" data-roi="{{ bird.roi }}"

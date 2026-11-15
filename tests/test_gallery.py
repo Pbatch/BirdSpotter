@@ -5,6 +5,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from urllib.response import addinfourl
 
+import cv2
 import numpy as np
 import pytest
 from starlette.testclient import TestClient
@@ -72,6 +73,22 @@ def test_templates_show_metadata_default_tab_and_empty_state(tmp_path: Path) -> 
     assert b'data-bbox="6,3,20,17"' in sightings
     assert b'data-roi="2,1,26,19"' in sightings
     assert b'width="24" height="18"' in sightings
+    assert b'href="/windows/2026-09-05_12-05/crop.jpg"' in sightings
+
+
+def test_crop_route_serves_the_frame_cropped_to_its_roi(tmp_path: Path) -> None:
+    window = create_window(tmp_path, "2026-09-05_12-05")
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+    cv2.imwrite(str(window / "full_frame.jpg"), frame)
+    client = TestClient(create_gallery_app(tmp_path))
+
+    response = client.get("/windows/2026-09-05_12-05/crop.jpg")
+
+    assert response.headers["content-type"] == "image/jpeg"
+    crop = cv2.imdecode(np.frombuffer(response.content, np.uint8), cv2.IMREAD_COLOR)
+    assert crop is not None
+    assert crop.shape == (18, 24, 3)
+    assert client.get("/windows/2026-09-05_12-10/crop.jpg").status_code == 404
 
 
 def test_london_timestamp_omits_the_winter_timezone_label() -> None:
